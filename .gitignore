@@ -1,0 +1,40 @@
+# Local Python environment and caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# Local settings and runtime artifacts
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+.local/
+data/
+outputs/
+work/
+logs/
+*.log
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+.vscode/
+
+# Confidential source documents: keep local, never overwrite
+/IEK/
+/Systeme electric/
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+*.tsv
+*.pdf

@@ -1,0 +1,22 @@
+[project]
+name = "hackalem-procurement"
+version = "0.1.0"
+description = "Local procurement assistant for the HackAlem case"
+requires-python = ">=3.11,<3.15"
+dependencies = [
+    "streamlit>=1.50,<2",
+    "pandas>=2.2,<4",
+    "numpy>=2.1,<3",
+    "openpyxl>=3.1,<4",
+    "plotly>=6,<7",
+]
+
+[dependency-groups]
+dev = ["pytest>=8,<10"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
