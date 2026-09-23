@@ -1,0 +1,891 @@
+{
+  "version": "synthetic-validation-1",
+  "language": "ru",
+  "purpose": "Независимые критерии приёмки, зафиксированные на этапе 5 до реализации подготовки спроса, прогноза и пополнения. Это спецификация, а не результат прохождения проверок.",
+  "dataset_contract": {
+    "generator_version": "synthetic-1",
+    "default_seed": 20260923,
+    "dataset_id_pattern": "synthetic-1-seed-{seed}",
+    "synthetic": true,
+    "suppliers": [
+      "Systeme Electric",
+      "IEK"
+    ],
+    "sku_count": 17,
+    "history_start": "2024-01-01",
+    "history_end": "2025-12-31",
+    "cutoff": "2026-01-01",
+    "history_months": 24,
+    "history_days": 731,
+    "model_database": "model/hackalem.sqlite3",
+    "evaluator_only_paths": [
+      "validation/truth.json",
+      "validation/scenarios.json",
+      "validation/spec.json"
+    ],
+    "parameters_status": "scenario",
+    "numerical_accuracy_proves_real_world_accuracy": false
+  },
+  "evaluation_protocol": {
+    "forecast_frequency": "month",
+    "rolling_origins": [
+      "2025-01-01",
+      "2025-02-01",
+      "2025-03-01",
+      "2025-04-01",
+      "2025-05-01",
+      "2025-06-01",
+      "2025-07-01",
+      "2025-08-01",
+      "2025-09-01",
+      "2025-10-01",
+      "2025-11-01",
+      "2025-12-01"
+    ],
+    "train_rule": "Для прогноза месяца M доступны только факты с датой < M; очистка, параметры и выбор модели не используют более поздние наблюдения или validation/truth.json.",
+    "target": "Скрытый регулярный спрос календарного месяца в учётных единицах; возвраты и разовая клиентская сделка не являются регулярным спросом.",
+    "minimum_history_months_for_primary_forecast_metrics": 12,
+    "primary_forecast_scenarios": [
+      "stable",
+      "seasonal",
+      "growth"
+    ],
+    "baselines": [
+      "last_complete_month",
+      "mean_of_last_3_complete_months",
+      "same_month_previous_year"
+    ],
+    "baseline_rule": "Базовые прогнозы строятся только по наблюдаемым данным на тот же origin; лучший baseline выбирается для итогового сравнения, а не для подглядывающего выбора модели по тестовому месяцу.",
+    "metrics": {
+      "wape": "sum(abs(predicted_regular_demand - true_regular_demand)) / sum(true_regular_demand), отдельно для каждого SKU",
+      "absolute_error": "abs(actual - expected)",
+      "relative_error": "abs(actual - expected) / abs(expected), только если expected != 0",
+      "zero_denominator": "Если сумма истинного спроса равна 0, WAPE не вычисляется; используется MAE и точная проверка нулевого заказа.",
+      "peak_to_mean": "max(monthly_quantity) / mean(monthly_quantity) за 12 месяцев",
+      "growth_ratio": "mean(Oct,Nov,Dec) / mean(Jan,Feb,Mar) одного проверочного года",
+      "comparison_currency": "Доли, не проценты: 0.10 = 10%; разность WAPE 0.02 = 2 процентных пункта."
+    },
+    "time_convention": {
+      "as_of": "Начало дня 0; текущий физический остаток относится к этой дате.",
+      "horizon_days": "lead_time_days + review_period_days",
+      "demand_days": "Дни 1..H включительно; потребление в конце дня.",
+      "incoming": "Поступление в начале указанного дня; ETA <= H включается в ресурс горизонта, ETA > H не включается. Календарь дефицита проверяется отдельно от общей суммы.",
+      "safety_stock": "В ручных примерах constant_daily_demand * safety_days.",
+      "new_order": "Ручная потребность — требуемое количество нового заказа. Календарь существующего запаса и пути проверяется до включения нового заказа."
+    },
+    "tolerances_policy": "Численные пороги меняются только новой версией спецификации с причиной; прохождение набора нельзя достигать изменением truth/критериев после просмотра результата модели.",
+    "manual_cases_are_synthetic": true,
+    "all_future_checks_pending": true
+  },
+  "requirements": [
+    {
+      "id": "base_need",
+      "title": "Базовая потребность учитывает продажи, остатки, путь, категорию и прирост",
+      "scenarios": [
+        "stable",
+        "growth",
+        "timely_incoming",
+        "late_incoming",
+        "minimum_order",
+        "order_multiple",
+        "unit_conversion",
+        "no_open_orders",
+        "missing_critical"
+      ],
+      "metric": [
+        "intermediate_quantity_absolute_error",
+        "purchase_quantity_absolute_error",
+        "input_sensitivity",
+        "missing_data_gate"
+      ],
+      "acceptance": {
+        "manual_cases": [
+          "M01",
+          "M02",
+          "M03",
+          "M04",
+          "M07",
+          "M09",
+          "M10"
+        ],
+        "exact_manual_values": true,
+        "reserve_subtraction_count": 1,
+        "growth_application_count": 1,
+        "input_sensitivity_expected_changes": 5,
+        "late_eta_cannot_cancel_prior_shortage": true,
+        "missing_critical_parameter_order_must_be_null": true,
+        "missing_critical_parameter_status": "Не хватает данных",
+        "unsupported_confirmation": false
+      },
+      "tolerance": {
+        "arithmetic_absolute": 1e-9,
+        "integer_purchase_units_absolute": 0
+      },
+      "implemented_stage": 9,
+      "status": "pending_stage_9"
+    },
+    {
+      "id": "seasonality_growth",
+      "title": "Прогноз сохраняет сезонность и устойчивый рост",
+      "scenarios": [
+        "stable",
+        "seasonal",
+        "growth",
+        "intermittent",
+        "new_product"
+      ],
+      "metric": [
+        "rolling_origin_wape",
+        "wape_difference_to_best_baseline",
+        "peak_to_mean_relative_error",
+        "peak_month_distance",
+        "growth_ratio_relative_error",
+        "finite_forecast_fraction"
+      ],
+      "acceptance": {
+        "stable_wape_max": 0.1,
+        "seasonal_wape_max": 0.15,
+        "growth_wape_max": 0.15,
+        "wape_difference_to_best_baseline_max": 0.02,
+        "seasonal_peak_to_mean_relative_error_max": 0.2,
+        "seasonal_peak_month_circular_distance_max": 1,
+        "growth_ratio_relative_error_max": 0.15,
+        "growth_predicted_last_quarter_mean_gt_first_quarter_mean": true,
+        "finite_nonnegative_forecast_fraction": 1,
+        "new_product_before_launch_not_treated_as_observed_zero": true,
+        "intermittent_and_new_product_primary_wape_gate": false,
+        "short_history_limitations_visible": true
+      },
+      "tolerance": {
+        "wape_absolute": 0.15,
+        "peak_relative": 0.2,
+        "growth_ratio_relative": 0.15,
+        "baseline_wape_absolute_difference": 0.02
+      },
+      "implemented_stage": 8,
+      "status": "pending_stage_8"
+    },
+    {
+      "id": "lost_demand",
+      "title": "Подтверждённое отсутствие повышает оценку спроса без повторного прибавления потерь",
+      "scenarios": [
+        "stockout",
+        "unknown_blank"
+      ],
+      "metric": [
+        "lost_quantity_relative_error",
+        "corrected_month_relative_error",
+        "error_reduction_vs_observed",
+        "unknown_availability_inference_count",
+        "double_count_amount"
+      ],
+      "acceptance": {
+        "stockout_months": [
+          "2024-08-01",
+          "2025-08-01"
+        ],
+        "stockout_days_per_month": 14,
+        "true_daily_demand": 7,
+        "true_demand_per_stockout_month": 217,
+        "observed_sales_per_stockout_month": 119,
+        "expected_lost_quantity_per_stockout_month": 98,
+        "lost_quantity_relative_error_max": 0.05,
+        "corrected_month_relative_error_max": 0.05,
+        "corrected_month_gt_observed_month": true,
+        "absolute_error_reduction_vs_observed_min": 0.9,
+        "reference_next_31_day_forecast": "Исправленный дневной темп * 31; выше observed_sales / 31 * 31 и ближе к 217.",
+        "unknown_blank_inferred_stockout_days": 0,
+        "unknown_blank_automatically_restored_quantity": 0,
+        "unknown_blank_requires_missing_data_or_explicit_scenario": true,
+        "manual_case": "M05",
+        "historical_lost_demand_added_again_to_current_order": 0
+      },
+      "tolerance": {
+        "lost_quantity_relative": 0.05,
+        "corrected_month_relative": 0.05,
+        "double_count_absolute": 0
+      },
+      "implemented_stage": 7,
+      "status": "pending_stage_7"
+    },
+    {
+      "id": "one_off_orders",
+      "title": "Разовая покупка одного клиента отделяется; повторяющиеся покупки и рост сохраняются",
+      "scenarios": [
+        "one_off_client",
+        "repeated_large_client",
+        "growth",
+        "return"
+      ],
+      "metric": [
+        "one_off_component_relative_error",
+        "regular_quantity_relative_error",
+        "repeated_large_retention",
+        "growth_retention",
+        "return_classification",
+        "raw_history_mutations"
+      ],
+      "acceptance": {
+        "one_off_date": "2025-06-17",
+        "true_one_off_quantity": 500,
+        "one_off_component_relative_error_max": 0.05,
+        "one_off_month_regular_quantity_relative_error_max": 0.05,
+        "paired_regular_forecast_or_need_relative_change_max": 0.05,
+        "paired_check": "Одинаковые данные и параметры с дополнительной разовой сделкой 500 и без неё; сравнивается регулярный компонент. Истина доступна только проверке.",
+        "repeated_large_monthly_component": 80,
+        "repeated_large_retained_fraction_min": 0.95,
+        "growth_regular_quantity_retained_fraction_min": 0.95,
+        "return_date": "2025-02-17",
+        "return_signed_quantity": -7,
+        "return_must_not_be_classified_as_one_off": true,
+        "return_must_not_be_made_positive_demand": true,
+        "raw_history_mutations": 0,
+        "removed_component_and_reason_present": true,
+        "client_analysis_uses_customer_id_not_document_id": true,
+        "manual_cases": [
+          "M06",
+          "M08"
+        ]
+      },
+      "tolerance": {
+        "one_off_relative": 0.05,
+        "regular_relative": 0.05,
+        "retention_loss_max": 0.05,
+        "return_signed_quantity_absolute": 0
+      },
+      "implemented_stage": 6,
+      "status": "pending_stage_6",
+      "dependent_order_check_status": "pending_stage_9"
+    },
+    {
+      "id": "supplier_orders",
+      "title": "Проект заказа объясним, разделён по поставщикам и воспроизводим при экспорте",
+      "scenarios": [
+        "stable",
+        "timely_incoming",
+        "late_incoming",
+        "minimum_order",
+        "order_multiple",
+        "unit_conversion",
+        "missing_critical",
+        "no_open_orders"
+      ],
+      "metric": [
+        "required_field_coverage",
+        "manual_recalculation_error",
+        "supplier_partition_error_count",
+        "approved_export_difference_count",
+        "scenario_label_coverage",
+        "blocked_sku_order_count"
+      ],
+      "acceptance": {
+        "required_fields": [
+          "sku",
+          "supplier",
+          "quantity_purchase",
+          "purchase_unit",
+          "quantity_accounting",
+          "accounting_unit",
+          "reason",
+          "urgency",
+          "snapshot_id",
+          "configuration_id",
+          "rules_version"
+        ],
+        "required_field_coverage": 1,
+        "supplier_partition_error_count": 0,
+        "manual_recalculation_error_max": 1e-9,
+        "nonzero_order_meets_minimum_and_multiple": true,
+        "zero_need_order": 0,
+        "blocked_sku_order_count": 0,
+        "scenario_label_coverage": 1,
+        "synthetic_run_cannot_be_represented_as_confirmed_real_order": true,
+        "approved_export_difference_count": 0,
+        "export_matches_immutable_approved_version": true,
+        "actual_supplier_submission": false
+      },
+      "tolerance": {
+        "quantity_absolute": 1e-9,
+        "count_absolute": 0,
+        "coverage_shortfall": 0
+      },
+      "implemented_stage": 11,
+      "status": "pending_stage_11",
+      "order_explanation_status": "pending_stage_9"
+    }
+  ],
+  "manual_cases": [
+    {
+      "id": "M01",
+      "title": "Резерв вычитается один раз",
+      "requirements": [
+        "base_need",
+        "supplier_orders"
+      ],
+      "inputs": {
+        "scenario": true,
+        "current_stock": 100,
+        "reserved_stock": 30,
+        "constant_daily_demand": 10,
+        "lead_time_days": 3,
+        "review_period_days": 7,
+        "safety_days": 0,
+        "incoming": [],
+        "no_open_orders": true,
+        "accounting_unit": "шт",
+        "purchase_unit": "шт",
+        "unit_factor": 1,
+        "minimum_order": 1,
+        "order_multiple": 1
+      },
+      "expected": {
+        "available_stock": 70,
+        "horizon_days": 10,
+        "horizon_demand": 100,
+        "net_need_accounting": 30,
+        "order_purchase": 30,
+        "order_accounting": 30
+      },
+      "explanation": "Доступно 100−30=70. Потребность 10*(3+7)−70=30. Если источник содержит уже свободный запас 70, резерв повторно из него не вычитается."
+    },
+    {
+      "id": "M02",
+      "title": "Срок, горизонт и своевременность поступления",
+      "requirements": [
+        "base_need",
+        "supplier_orders"
+      ],
+      "inputs": {
+        "scenario": true,
+        "current_stock": 20,
+        "reserved_stock": 0,
+        "constant_daily_demand": 10,
+        "lead_time_days": 5,
+        "review_period_days": 2,
+        "safety_days": 0,
+        "incoming_quantity_accounting": 30,
+        "timely_eta_day": 2,
+        "late_eta_day": 8,
+        "minimum_order": 1,
+        "order_multiple": 1,
+        "unit_factor": 1
+      },
+      "expected": {
+        "horizon_days": 7,
+        "horizon_demand": 70,
+        "timely_incoming_in_horizon": 30,
+        "timely_net_need": 20,
+        "late_incoming_in_horizon": 0,
+        "late_net_need": 50,
+        "timely_first_deficit_day_without_new_order": 6,
+        "late_first_deficit_day_without_new_order": 3,
+        "timely_deficit_before_new_order_day_5": 0,
+        "late_deficit_before_new_order_day_5": 20,
+        "eta_day_7_is_in_horizon": true,
+        "eta_day_8_is_in_horizon": false
+      },
+      "explanation": "ETA учитывается в начале дня. Путь на день 8 не покрывает дни 1–7. В позднем варианте к концу дня 4 не обеспечены 20 единиц — последующий приход не устраняет ранний дефицит."
+    },
+    {
+      "id": "M03",
+      "title": "MOQ и кратность в закупочной единице",
+      "requirements": [
+        "base_need",
+        "supplier_orders"
+      ],
+      "inputs": {
+        "scenario": true,
+        "accounting_unit": "шт",
+        "purchase_unit": "упак",
+        "unit_factor": 4,
+        "minimum_order_purchase": 5,
+        "order_multiple_purchase": 3,
+        "positive_need_cases_accounting": [
+          1,
+          25
+        ]
+      },
+      "expected": {
+        "cases": [
+          {
+            "need_accounting": 1,
+            "unrounded_purchase": 0.25,
+            "order_purchase": 6,
+            "order_accounting": 24
+          },
+          {
+            "need_accounting": 25,
+            "unrounded_purchase": 6.25,
+            "order_purchase": 9,
+            "order_accounting": 36
+          }
+        ]
+      },
+      "explanation": "Только при положительной потребности: ceil(max(need/4,5)/3)*3. MOQ 5 не означает кратность 5; упаковки по 4 штуки не означают кратность заказа 4 упаковки."
+    },
+    {
+      "id": "M04",
+      "title": "Нулевая потребность не запускает минимальный заказ",
+      "requirements": [
+        "base_need",
+        "supplier_orders"
+      ],
+      "inputs": {
+        "scenario": true,
+        "horizon_demand": 0,
+        "safety_stock": 0,
+        "available_stock": 0,
+        "incoming_in_horizon": 0,
+        "minimum_order_purchase": 5,
+        "order_multiple_purchase": 3,
+        "unit_factor": 4
+      },
+      "expected": {
+        "net_need_accounting": 0,
+        "order_purchase": 0,
+        "order_accounting": 0
+      },
+      "explanation": "Условие need<=0 проверяется раньше MOQ и округления. Нулевой заказ допустим независимо от положительного минимума."
+    },
+    {
+      "id": "M05",
+      "title": "Восстановленный спрос не прибавляется второй раз",
+      "requirements": [
+        "lost_demand",
+        "base_need"
+      ],
+      "inputs": {
+        "scenario": true,
+        "period_days": 30,
+        "confirmed_available_days": 20,
+        "confirmed_unavailable_days": 10,
+        "observed_sales": 60,
+        "constant_rate_assumption": true,
+        "next_horizon_days": 30,
+        "available_stock": 20,
+        "incoming_in_horizon": 10,
+        "safety_stock": 0,
+        "unit_factor": 1,
+        "minimum_order": 1,
+        "order_multiple": 1
+      },
+      "expected": {
+        "estimated_demand_per_available_day": 3,
+        "estimated_lost_demand": 30,
+        "corrected_historical_demand": 90,
+        "forecast_horizon_demand": 90,
+        "net_need_accounting": 60,
+        "order_purchase": 60,
+        "wrong_double_counted_order": 90
+      },
+      "explanation": "60/20=3; восстановлено 3*10=30; прогноз 3*30=90. Новый заказ 90−20−10=60. Исторические 30 уже вошли в прогноз и не являются дополнительным сегодняшним обязательством."
+    },
+    {
+      "id": "M06",
+      "title": "Разовый клиентский компонент отделяется от регулярного",
+      "requirements": [
+        "one_off_orders"
+      ],
+      "inputs": {
+        "scenario": true,
+        "period_days": 30,
+        "regular_daily_demand": 4,
+        "one_off_customer_id": "SYN-C-MANUAL-ONE",
+        "one_off_quantity": 500,
+        "repeated_monthly_large_quantity": 80,
+        "regular_or_one_off_labels": "evaluator_only"
+      },
+      "expected": {
+        "one_off_case_raw_month": 620,
+        "one_off_case_regular_month": 120,
+        "one_off_component": 500,
+        "one_off_regular_need_with_zero_stock": 120,
+        "counterfactual_without_one_off_regular_need": 120,
+        "repeated_case_raw_month": 200,
+        "repeated_case_regular_month": 200,
+        "repeated_component_removed": 0,
+        "raw_records_changed": 0
+      },
+      "explanation": "У одного сценария разовая сделка 500, у другого устойчивые ежемесячные 80. Оба исходных потока остаются в аудите. Отдельное известное непогашенное проектное обязательство не исчезает при исключении продажи из регулярной истории."
+    },
+    {
+      "id": "M07",
+      "title": "Пять независимых факторов изменяют потребность",
+      "requirements": [
+        "base_need"
+      ],
+      "inputs": {
+        "scenario": true,
+        "baseline": {
+          "constant_daily_demand": 10,
+          "current_stock": 50,
+          "reserved_stock": 10,
+          "incoming_in_horizon": 10,
+          "lead_time_days": 3,
+          "review_period_days": 4,
+          "safety_days": 0,
+          "business_growth": 0,
+          "baseline_excludes_business_growth": true,
+          "unit_factor": 1,
+          "minimum_order": 1,
+          "order_multiple": 1
+        },
+        "mutations": [
+          {
+            "factor": "sales",
+            "replace": {
+              "constant_daily_demand": 12
+            }
+          },
+          {
+            "factor": "stock",
+            "replace": {
+              "current_stock": 55
+            }
+          },
+          {
+            "factor": "incoming",
+            "replace": {
+              "incoming_in_horizon": 20
+            }
+          },
+          {
+            "factor": "category_policy",
+            "replace": {
+              "safety_days": 2
+            }
+          },
+          {
+            "factor": "business_growth",
+            "replace": {
+              "business_growth": 0.2
+            }
+          }
+        ]
+      },
+      "expected": {
+        "baseline_available_stock": 40,
+        "baseline_horizon_demand": 70,
+        "baseline_order": 20,
+        "orders_by_factor": {
+          "sales": 34,
+          "stock": 15,
+          "incoming": 10,
+          "category_policy": 40,
+          "business_growth": 34
+        },
+        "changed_factors": 5,
+        "growth_application_count": 1
+      },
+      "explanation": "Каждая замена проверяется отдельно от одного baseline. Категория влияет через явно заданную политику safety_days. Прирост 20% превращает 10 в 12 один раз; он не дублирует уже включённый в базовый прогноз тот же прирост."
+    },
+    {
+      "id": "M08",
+      "title": "Альтернативные отчёты и возврат не удваивают спрос",
+      "requirements": [
+        "one_off_orders",
+        "base_need"
+      ],
+      "inputs": {
+        "scenario": true,
+        "transactions_positive_quantity": 100,
+        "transactions_return_quantity": -10,
+        "return_refers_to_prior_period": true,
+        "monthly_sales_alternative": 90,
+        "chosen_source": "transactions",
+        "scope": "source_report"
+      },
+      "expected": {
+        "source_transactions_signed_audit": 90,
+        "source_monthly_sales_audit": 90,
+        "chosen_signed_audit": 90,
+        "regular_positive_demand": 100,
+        "return_component_signed": -10,
+        "return_component_one_off": 0,
+        "incorrect_sum_of_alternative_sources": 180
+      },
+      "explanation": "В фикстуре документ явно определён как возврат прежней продажи. 100 и −10 хранятся отдельно; не получается положительный спрос 110. Два отчёта одного потока дают выбранные 90 в аудите, а не 180. До этапа 6 выбранная отрицательная строка блокирует расчёт."
+    },
+    {
+      "id": "M09",
+      "title": "Единица пути задаётся явно и переводится один раз",
+      "requirements": [
+        "base_need",
+        "supplier_orders"
+      ],
+      "inputs": {
+        "scenario": true,
+        "current_stock_accounting": 30,
+        "reserved_stock_accounting": 10,
+        "horizon_demand_accounting": 60,
+        "safety_stock": 0,
+        "incoming_raw_quantity": 5,
+        "accounting_unit": "шт",
+        "purchase_unit": "упак",
+        "unit_factor": 4,
+        "minimum_order_purchase": 1,
+        "order_multiple_purchase": 1
+      },
+      "expected": {
+        "available_stock_accounting": 20,
+        "if_incoming_unit_purchase": {
+          "incoming_accounting": 20,
+          "net_need_accounting": 20,
+          "order_purchase": 5,
+          "order_accounting": 20
+        },
+        "if_incoming_unit_accounting": {
+          "incoming_accounting": 5,
+          "net_need_accounting": 35,
+          "order_purchase": 9,
+          "order_accounting": 36
+        },
+        "if_incoming_unit_unknown": {
+          "order_purchase": null,
+          "status": "Не хватает данных"
+        }
+      },
+      "explanation": "Пять упаковок — 20 штук, но пять штук — 5 штук. Единица не выводится из величины числа. Финальное округление в упаковках может увеличить учётное количество с 35 до 36."
+    },
+    {
+      "id": "M10",
+      "title": "Неизвестное значение и пропущенный срок не становятся нулём",
+      "requirements": [
+        "base_need",
+        "lost_demand",
+        "supplier_orders"
+      ],
+      "inputs": {
+        "scenario": true,
+        "observed_sales_state": "blank",
+        "observed_sales_quantity": null,
+        "availability": null,
+        "lead_time_days": null
+      },
+      "expected": {
+        "inferred_stockout_days": 0,
+        "automatically_restored_quantity": 0,
+        "order_purchase": null,
+        "status": "Не хватает данных",
+        "lead_time_days_defaulted_to_zero": false,
+        "missing_parameter_does_not_hide_sku": true
+      },
+      "explanation": "Пустая наблюдаемая ячейка — не доказанный stockout. Явная политика zero может изменить только такую наблюдаемую пустоту, но не отсутствующий месяц, ошибку или неизвестный срок поставки."
+    }
+  ],
+  "dataset_checks": [
+    {
+      "id": "D01",
+      "title": "Детерминизм одного seed",
+      "assertion": "Два независимых запуска с одинаковыми целым seed и версией дают одинаковые отсортированные наблюдения, конфигурации, truth, сценарии и спецификацию.",
+      "expected": {
+        "canonical_payload_equal": true
+      },
+      "tolerance": {
+        "differences": 0
+      },
+      "stage": 5,
+      "note": "Служебное время создания и расположение набора не являются бизнес-данными; побайтовое равенство SQLite не заменяет сравнение канонических фактов."
+    },
+    {
+      "id": "D02",
+      "title": "Изоляция набора",
+      "assertion": "Набор хранится под отдельным dataset_id; model DB отмечена synthetic; реальные базы и исходные Excel/PDF не меняются.",
+      "expected": {
+        "real_source_hash_changes": 0,
+        "real_database_hash_changes": 0,
+        "synthetic_metadata": true
+      },
+      "tolerance": {
+        "changes": 0
+      },
+      "stage": 5
+    },
+    {
+      "id": "D03",
+      "title": "Периоды и покрытие",
+      "assertion": "Ровно 17 SKU двух поставщиков и 24 последовательных месяца 2024–2025; дневная сетка 731 день, cutoff 2026-01-01. Не все SKU обязаны иметь 731 наблюдение продаж: новый товар не наблюдался до запуска.",
+      "expected": {
+        "suppliers": 2,
+        "skus": 17,
+        "months": 24,
+        "calendar_days": 731,
+        "cutoff": "2026-01-01"
+      },
+      "tolerance": {
+        "count_difference": 0
+      },
+      "stage": 5
+    },
+    {
+      "id": "D04",
+      "title": "Полный перечень сценариев",
+      "assertion": "Идентификаторы уникальны и все перечисленные сценарии присутствуют в validation/scenarios.json; каждый must-have имеет численный pending критерий.",
+      "expected": {
+        "scenario_ids": [
+          "stable",
+          "seasonal",
+          "growth",
+          "intermittent",
+          "new_product",
+          "one_off_client",
+          "repeated_large_client",
+          "return",
+          "stockout",
+          "unknown_blank",
+          "no_open_orders",
+          "timely_incoming",
+          "late_incoming",
+          "minimum_order",
+          "order_multiple",
+          "unit_conversion",
+          "missing_critical"
+        ],
+        "must_have_ids": [
+          "base_need",
+          "seasonality_growth",
+          "lost_demand",
+          "one_off_orders",
+          "supplier_orders"
+        ]
+      },
+      "tolerance": {
+        "missing": 0,
+        "duplicates": 0
+      },
+      "stage": 5
+    },
+    {
+      "id": "D05",
+      "title": "Модель не видит эталон",
+      "assertion": "В наблюдаемой БД нет истинного скрытого спроса, величины упущенного спроса, метки one-off/outlier или типа сценария товара. Модель получает только путь model/hackalem.sqlite3 и не читает соседнюю validation.",
+      "expected": {
+        "oracle_fields_in_model_db": 0,
+        "model_reads_validation": 0
+      },
+      "tolerance": {
+        "leaks": 0
+      },
+      "stage": 5,
+      "note": "Нейтральные имена и синтетические customer_id допустимы. Журнал фактической наблюдаемой доступности — публичный вход, а не истинный спрос. Динамическая проверка чтений будущей моделью ожидает этап 8."
+    },
+    {
+      "id": "D06",
+      "title": "Общий нормализованный контракт",
+      "assertion": "Два адаптера сохраняют наблюдения в общие таблицы и проходят существующий отчёт/контроль качества; signed возвраты, нули, blank и provenance сохраняются.",
+      "expected": {
+        "supplier_adapters": 2,
+        "dedicated_synthetic_forecast_pipeline": false,
+        "truth_columns_in_normalized_facts": 0
+      },
+      "tolerance": {
+        "contract_errors": 0
+      },
+      "stage": 5
+    },
+    {
+      "id": "D07",
+      "title": "Сценарный статус бизнес-параметров",
+      "assertion": "Все генерируемые бизнес-параметры и решения источника имеют status=scenario, reason и author. Синтетический набор не создаёт подтверждённого реального заказа.",
+      "expected": {
+        "scenario_parameter_fraction": 1,
+        "scenario_source_choice_fraction": 1,
+        "confirmed_real_orders": 0
+      },
+      "tolerance": {
+        "fraction_shortfall": 0
+      },
+      "stage": 5
+    },
+    {
+      "id": "D08",
+      "title": "Проверяемые события эталона",
+      "assertion": "Эталон содержит добавку 500 от клиента 17.06.2025, повторяющиеся 80 каждый месяц, возврат −7 17.02.2025 и 28 доказанных дней stockout по 7 единиц.",
+      "expected": {
+        "one_off_quantity": 500,
+        "repeated_large_events": 24,
+        "repeated_large_quantity_each": 80,
+        "return_quantity": -7,
+        "stockout_days": 28,
+        "stockout_lost_quantity": 196
+      },
+      "tolerance": {
+        "quantity_absolute": 0,
+        "count_absolute": 0
+      },
+      "stage": 5
+    },
+    {
+      "id": "D09",
+      "title": "Пустота и новый товар",
+      "assertion": "10–16.11.2025 unknown_blank сохраняет qty=null и availability=null; до запуска 01.10.2025 нового товара отсутствие документов не превращается в наблюдаемые нули.",
+      "expected": {
+        "unknown_blank_days": 7,
+        "unknown_blank_inferred_stockout_days": 0,
+        "new_product_launch": "2025-10-01",
+        "prelaunch_observed_zero_documents": 0
+      },
+      "tolerance": {
+        "count_difference": 0
+      },
+      "stage": 5
+    },
+    {
+      "id": "D10",
+      "title": "Положительный путь и отсутствие открытых заказов",
+      "assertion": "Для положительного пути явно заданы дата ETA и единицы; отсутствие положительных строк само по себе не означает отсутствие обязательств. no_open_orders — явное сценарное решение.",
+      "expected": {
+        "timely_eta": "2026-01-04",
+        "late_eta": "2026-01-20",
+        "each_incoming_quantity": 60,
+        "no_open_orders_is_explicit": true
+      },
+      "tolerance": {
+        "date_difference_days": 0,
+        "quantity_absolute": 0
+      },
+      "stage": 5
+    },
+    {
+      "id": "D11",
+      "title": "Пропущенный обязательный параметр",
+      "assertion": "У missing_critical отсутствует lead_time_days. SKU остаётся в отчёте с причиной нехватки, не получает значение по умолчанию и не препятствует независимым SKU.",
+      "expected": {
+        "missing_parameter": "lead_time_days",
+        "status": "Не хватает данных",
+        "eligible_for_calculation": false,
+        "sku_hidden": false
+      },
+      "tolerance": {
+        "violations": 0
+      },
+      "stage": 5
+    },
+    {
+      "id": "D12",
+      "title": "Ручной эталон независим",
+      "assertion": "Результаты M01–M10 сверяются арифметикой без вызова будущего расчётного ядра; изменение модели не меняет expected.",
+      "expected": {
+        "manual_cases": 10,
+        "model_imports_during_reference_check": 0
+      },
+      "tolerance": {
+        "arithmetic_absolute": 1e-9
+      },
+      "stage": 5
+    },
+    {
+      "id": "D13",
+      "title": "Фиксация версии критериев",
+      "assertion": "Копия данной спецификации попадает в validation/spec.json и фиксируется manifest до моделей; прохождение последующих проверок регистрируется отдельно от status в исходном эталоне.",
+      "expected": {
+        "spec_version": "synthetic-validation-1",
+        "future_checks_marked_pending": true
+      },
+      "tolerance": {
+        "unversioned_changes": 0
+      },
+      "stage": 5
+    }
+  ]
+}

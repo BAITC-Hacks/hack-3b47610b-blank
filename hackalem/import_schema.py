@@ -127,9 +127,12 @@ MIGRATION_3 = [
 ]
 
 
-def schema_signature(connection, version=3):
+def schema_signature(connection, version=4):
     """Compare the owned table structures before touching an existing database."""
     statements = SCHEMA_SQL + (MIGRATION_3 if version >= 3 else [])
+    if version >= 4:
+        from hackalem.quality_schema import MIGRATION_4
+        statements += MIGRATION_4
     tables = [statement.split()[2] for statement in statements if statement.startswith("CREATE TABLE")]
     return {
         table: connection.execute(f"PRAGMA table_info({table})").fetchall()

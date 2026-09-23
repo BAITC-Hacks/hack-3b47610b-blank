@@ -13,6 +13,7 @@ from hackalem.config import PROJECT_ROOT, Settings
 from hackalem.import_schema import EXTRA_FACT_COLUMNS, FACT_COLUMNS
 from hackalem.importers import systeme as parser
 from hackalem.storage import initialize_database
+from hackalem.services.datasets import dataset_context, require_real_dataset
 
 SOURCE_KINDS = frozenset({
     "multiples", "transactions", "monthly_stock", "monthly_sales", "seasonality", "current",
@@ -146,6 +147,7 @@ def _create_snapshot(connection, versions, parameters, supplier="Systeme Electri
 
 def create_snapshot(database_path: Path, versions: dict[str, int], parameters: dict | None = None, *, supplier="Systeme Electric"):
     """Pin one existing import per source; old sets are never edited or combined."""
+    require_real_dataset(database_path)
     initialize_database(database_path)
     with closing(_connect(database_path)) as connection, connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -167,6 +169,7 @@ def import_supplier(settings: Settings, supplier: str, parameters: dict | None =
     runtime directory, so a file changed during parsing cannot change the hash
     provenance of data already being parsed.
     """
+    require_real_dataset(settings.database_path)
     module, directory, _ = _profile(supplier)
     folder = settings.source_dir / directory
     if not folder.is_dir():
@@ -277,6 +280,7 @@ def report_snapshot(database_path: Path, snapshot_id: int):
         )]
         return {
             "snapshot_id": snapshot_id, "created_at_utc": snapshot["created_at_utc"], "supplier": snapshot["supplier"],
+            "dataset": dataset_context(database_path),
             "files": files, "totals": totals, "issues": issues, "issue_codes": issue_codes,
             "issue_examples": examples, "issue_examples_limit": 100,
             "unit_assessments": [dict(row) for row in connection.execute(

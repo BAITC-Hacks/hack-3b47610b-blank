@@ -18,6 +18,7 @@ from hackalem.services.units import (
     confirm_unit_conversion, convert_quantity, get_unit_assessment, list_unit_issues,
 )
 from hackalem.storage import UnsupportedSchemaError
+from hackalem.services.datasets import dataset_context
 
 
 _SERVICE_ERRORS = (OSError, ValueError, sqlite3.Error, RuntimeError)
@@ -194,6 +195,7 @@ def render_home() -> None:
 
     try:
         state = bootstrap(load_settings())
+        dataset = dataset_context(state.settings.database_path)
     except (OSError, ValueError, sqlite3.Error, UnsupportedSchemaError) as error:
         st.error(f"Не удалось подготовить локальное хранилище: {error}")
         st.info("Проверьте пути и доступ к папкам. Исходные отчёты не изменяются.")
@@ -202,7 +204,7 @@ def render_home() -> None:
     with st.sidebar:
         st.markdown("**Рабочее пространство**")
         st.write("Локальное хранилище подключено")
-        st.caption("Импорт двух поставщиков: этап 3 из 12")
+        st.caption("Проверочный набор: этап 5 из 12")
         with st.expander("Расположение файлов"):
             st.write("Исходные отчёты")
             st.code(str(state.settings.source_dir), language=None)
@@ -215,13 +217,16 @@ def render_home() -> None:
             "Укажите существующую папку в HACKALEM_SOURCE_DIR перед этапом импорта."
         )
 
+    if dataset['kind'] == 'synthetic':
+        st.warning('СИНТЕТИЧЕСКИЙ ПРОВЕРОЧНЫЙ НАБОР — вымышленные товары, клиенты и условия. Для реальных закупок не применяется.')
+        st.caption(f"Dataset: {dataset['dataset_id']}. Скрытый спрос и эталонные метки в интерфейс модели не загружаются.")
     st.subheader("Данные поставщиков")
     st.caption("Импорт сохраняет версии файлов, значения и их происхождение.")
     supplier = st.selectbox("Поставщик для импорта", SUPPLIERS, key="import_supplier")
     if st.button(
         f"Импортировать {supplier}",
         type="primary",
-        disabled=not state.source_directory_exists,
+        disabled=not state.source_directory_exists or dataset['kind'] == 'synthetic',
     ):
         try:
             with st.spinner("Читаем отчёты и сохраняем снимок…"):
@@ -268,6 +273,8 @@ def render_home() -> None:
                 _render_report(report)
                 _render_lineage(state.settings.database_path, report)
                 _render_units(state.settings.database_path, report)
+                from hackalem.ui.quality_panel import render_quality_panel
+                render_quality_panel(state.settings.database_path, selected_id)
 
     st.divider()
     st.caption("Прогноз, расчёт заказов и экспорт будут добавлены на следующих этапах.")
