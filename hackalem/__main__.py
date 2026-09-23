@@ -23,6 +23,7 @@ from hackalem.services.quality import (
 )
 from hackalem.services.units import get_unit_assessment
 from hackalem.services.cleaning import cleaning_report, list_cleaning_runs, run_cleaning
+from hackalem.services.forecasting import forecast_report, list_forecast_runs, run_forecast
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -79,6 +80,20 @@ def _parser() -> argparse.ArgumentParser:
     cleaning_report_command.add_argument("--limit", type=int, default=100)
     cleaning_runs = commands.add_parser("cleaning-runs", help="Показать версии подготовки снимка")
     cleaning_runs.add_argument("--snapshot", type=int, required=True)
+    forecast = commands.add_parser("forecast", help="Сохранить месячный прогноз одного SKU")
+    forecast.add_argument("--quality-run", type=int, required=True)
+    forecast.add_argument("--cleaning-run", type=int, required=True)
+    forecast.add_argument("--sku", required=True)
+    forecast.add_argument("--config", type=Path, required=True, help="JSON-настройка прогноза")
+    forecast.add_argument("--allow-scenario", action="store_true")
+    forecast_report_command = commands.add_parser("forecast-report", help="Показать сохранённый прогноз")
+    forecast_report_command.add_argument("--run", type=int, required=True)
+    forecast_runs = commands.add_parser("forecast-runs", help="Показать прогнозы снимка")
+    forecast_runs.add_argument("--snapshot", type=int, required=True)
+    forecast_runs.add_argument("--sku")
+    evaluation = commands.add_parser("forecast-evaluate", help="Проверить прогнозы только по синтетическому эталону")
+    evaluation.add_argument("--dataset", type=Path, required=True)
+    evaluation.add_argument("--runs", type=int, nargs="+", required=True)
     return parser
 
 
@@ -88,10 +103,16 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(encoding="utf-8")
     args = _parser().parse_args(argv)
     try:
-        if args.command in ("synthetic-generate", "synthetic-report"):
-            from hackalem.services.synthetic import DEFAULT_OUTPUT_ROOT, create_synthetic_dataset, synthetic_report
-            result = (create_synthetic_dataset(args.output_root or DEFAULT_OUTPUT_ROOT, args.seed)
-                      if args.command == "synthetic-generate" else synthetic_report(args.dataset))
+        if args.command in ("synthetic-generate", "synthetic-report", "forecast-evaluate"):
+            from hackalem.services.synthetic import (
+                DEFAULT_OUTPUT_ROOT, create_synthetic_dataset, evaluate_forecasts, synthetic_report,
+            )
+            if args.command == "synthetic-generate":
+                result = create_synthetic_dataset(args.output_root or DEFAULT_OUTPUT_ROOT, args.seed)
+            elif args.command == "synthetic-report":
+                result = synthetic_report(args.dataset)
+            else:
+                result = evaluate_forecasts(args.dataset, args.runs)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
         state = bootstrap(load_settings())
@@ -127,6 +148,14 @@ def main(argv: list[str] | None = None) -> int:
             result = cleaning_report(database_path, args.run, sku=args.sku, limit=args.limit)
         elif args.command == "cleaning-runs":
             result = list_cleaning_runs(database_path, args.snapshot)
+        elif args.command == "forecast":
+            payload = json.loads(args.config.read_text(encoding="utf-8-sig"))
+            result = run_forecast(database_path, args.quality_run, args.cleaning_run, args.sku,
+                                  payload, allow_scenario=args.allow_scenario)
+        elif args.command == "forecast-report":
+            result = forecast_report(database_path, args.run)
+        elif args.command == "forecast-runs":
+            result = list_forecast_runs(database_path, args.snapshot, args.sku)
         else:
             result = trace_cell(
                 database_path,

@@ -512,9 +512,9 @@ def test_stage3_migration_preserves_imported_facts_and_snapshot_membership(tmp_p
     def old_contents():
         with closing(sqlite3.connect(database)) as connection:
             tables = [row[0] for row in connection.execute(
-                """SELECT name FROM sqlite_master WHERE type='table'
-                    AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'quality_%'
-                    AND name NOT LIKE 'cleaning_%' ORDER BY name""",
+                    """SELECT name FROM sqlite_master WHERE type='table'
+                        AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'quality_%'
+                        AND name NOT LIKE 'cleaning_%' AND name NOT LIKE 'forecast_%' ORDER BY name""",
             )]
             return {table: connection.execute(f'SELECT * FROM "{table}" ORDER BY rowid').fetchall() for table in tables}
 

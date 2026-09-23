@@ -9,6 +9,7 @@ from contextlib import closing
 from datetime import date
 import hashlib
 import json
+from math import isfinite
 from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
@@ -221,10 +222,13 @@ def _validate_existing(dataset_dir):
 def create_synthetic_dataset(output_root=DEFAULT_OUTPUT_ROOT, seed=DEFAULT_SEED):
     from hackalem.synthetic.generator import generate_dataset
     bundle = generate_dataset(seed)
-    root = Path(output_root).resolve()
+    # Keep the caller-visible path spelling (notably /var vs /private/var on macOS)
+    # while resolving only comparisons against protected source directories.
+    root = Path(output_root).absolute()
+    resolved_root = root.resolve()
     for protected_root in (PROJECT_ROOT, load_settings().source_dir):
         for folder in ('IEK', 'Systeme electric'):
-            if root.is_relative_to((protected_root / folder).resolve()):
+            if resolved_root.is_relative_to((protected_root / folder).resolve()):
                 raise ValueError('Нельзя создавать dataset в папке исходных файлов.')
     destination = root / bundle['manifest']['dataset_id']
     # Deterministic, explicit artifacts. Runtime timestamps are only in SQLite results.
@@ -255,7 +259,7 @@ def create_synthetic_dataset(output_root=DEFAULT_OUTPUT_ROOT, seed=DEFAULT_SEED)
 
 
 def synthetic_report(dataset_dir):
-    directory = Path(dataset_dir).resolve()
+    directory = Path(dataset_dir).absolute()
     manifest = _validate_existing(directory)
     database = directory / 'model/hackalem.sqlite3'
     spec = json.loads((directory / 'validation/spec.json').read_text(encoding='utf-8'))
@@ -269,6 +273,82 @@ def synthetic_report(dataset_dir):
     return {'dataset_id': manifest['dataset_id'], 'dataset_dir': str(directory), 'database_path': str(database),
             'manifest': manifest, 'snapshots': snapshots, 'counts': counts,
             'validation': {'integrity': 'ok', 'artifact_hashes': 'ok', 'model_fingerprint': 'ok', 'scenario_count': len(scenarios), 'requirements': spec['requirements'], 'manual_cases': spec['manual_cases'], 'note': 'Готовность набора проверена. Качество будущих прогнозов и заказов ещё не проверено.'}}
+
+
+def evaluate_forecasts(dataset_dir, run_ids):
+    """Evaluator-only truth comparison; forecast services never call this function."""
+    directory = Path(dataset_dir).resolve()
+    _validate_existing(directory)
+    if not isinstance(run_ids, list) or not run_ids or any(isinstance(value, bool) or not isinstance(value, int) for value in run_ids):
+        raise ValueError('Укажите непустой список номеров прогнозов.')
+    database = directory / 'model/hackalem.sqlite3'
+    scenarios = json.loads((directory / 'validation/scenarios.json').read_text(encoding='utf-8'))
+    truth = json.loads((directory / 'validation/truth.json').read_text(encoding='utf-8'))
+    spec = json.loads((directory / 'validation/spec.json').read_text(encoding='utf-8'))
+    by_sku = {item['sku']: item for item in scenarios}
+    monthly = defaultdict(float)
+    for row in truth['daily']:
+        if row['regular_demand'] is not None:
+            monthly[row['sku'], row['date'][:7] + '-01'] += row['regular_demand']
+    from hackalem.services.forecasting import forecast_report
+    reports = []
+    for run_id in run_ids:
+        report = forecast_report(database, run_id)
+        scenario = by_sku.get(report['sku'])
+        if scenario is None:
+            raise ValueError('Прогноз не относится к SKU этого синтетического эталона.')
+        points = report['summary']['backtest']
+        compared = [{**point, 'truth': monthly[report['sku'], point['period']]}
+                    for point in points if (report['sku'], point['period']) in monthly]
+        denominator = sum(point['truth'] for point in compared)
+        errors = [point['prediction'] - point['truth'] for point in compared]
+        predictions = [point['prediction'] for point in compared]
+        actual = [point['truth'] for point in compared]
+        metrics = {
+            'count': len(compared),
+            'wape': sum(abs(value) for value in errors) / denominator if denominator else None,
+            'mae_units': sum(abs(value) for value in errors) / len(errors) if errors else None,
+            'bias_units': sum(errors) / len(errors) if errors else None,
+            'finite_nonnegative_fraction': (sum(isfinite(value) and value >= 0 for value in predictions) / len(predictions)
+                                            if predictions else None),
+        }
+        if scenario['id'] == 'seasonal' and predictions:
+            predicted_mean, actual_mean = sum(predictions) / len(predictions), sum(actual) / len(actual)
+            predicted_peak, actual_peak = max(predictions), max(actual)
+            metrics.update(
+                peak_to_mean_relative_error=abs(predicted_peak / predicted_mean - actual_peak / actual_mean) / (actual_peak / actual_mean),
+                predicted_peak_month=compared[predictions.index(predicted_peak)]['period'],
+                actual_peak_month=compared[actual.index(actual_peak)]['period'],
+            )
+        if scenario['id'] == 'growth' and len(predictions) == 12:
+            predicted_ratio = (sum(predictions[9:12]) / 3) / (sum(predictions[:3]) / 3)
+            actual_ratio = (sum(actual[9:12]) / 3) / (sum(actual[:3]) / 3)
+            metrics.update(growth_ratio=predicted_ratio,
+                           growth_ratio_relative_error=abs(predicted_ratio - actual_ratio) / actual_ratio,
+                           last_quarter_gt_first=predicted_ratio > 1)
+        reports.append({'run_id': run_id, 'scenario': scenario['id'], 'sku': report['sku'],
+                        'selected_model': report['selected_model'], 'metrics': metrics,
+                        'model_selection': report['summary']['model_selection'],
+                        'limitations': report['summary']['limitations']})
+    primary = {item['scenario']: item for item in reports if item['scenario'] in ('stable', 'seasonal', 'growth')}
+    acceptance = next(item['acceptance'] for item in spec['requirements'] if item['id'] == 'seasonality_growth')
+    checks = {}
+    for scenario in ('stable', 'seasonal', 'growth'):
+        item = primary.get(scenario)
+        checks[f'{scenario}_present'] = item is not None
+        if item:
+            checks[f'{scenario}_wape'] = item['metrics']['wape'] <= acceptance[f'{scenario}_wape_max']
+            difference = item['model_selection'].get('wape_difference_to_best_baseline')
+            checks[f'{scenario}_baseline_difference'] = difference is not None and difference <= acceptance['wape_difference_to_best_baseline_max']
+    if 'seasonal' in primary:
+        checks['seasonal_peak_shape'] = primary['seasonal']['metrics'].get('peak_to_mean_relative_error', float('inf')) <= acceptance['seasonal_peak_to_mean_relative_error_max']
+    if 'growth' in primary:
+        checks['growth_ratio'] = primary['growth']['metrics'].get('growth_ratio_relative_error', float('inf')) <= acceptance['growth_ratio_relative_error_max']
+        checks['growth_direction'] = primary['growth']['metrics'].get('last_quarter_gt_first') is True
+    return {'dataset_id': dataset_context(database)['dataset_id'], 'evaluator_only_truth_used': True,
+            'forecast_model_oracle_access': False, 'reports': reports, 'checks': checks,
+            'passed': bool(checks) and all(checks.values()),
+            'note': 'Синтетические метрики не доказывают точность на реальных цензурированных продажах.'}
 
 
 def read_observed_context(database_path, snapshot_id, cutoff):

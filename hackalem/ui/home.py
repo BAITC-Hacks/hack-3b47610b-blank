@@ -204,7 +204,7 @@ def render_home() -> None:
     with st.sidebar:
         st.markdown("**Рабочее пространство**")
         st.write("Локальное хранилище подключено")
-        st.caption("Проверочный набор: этап 5 из 12")
+        st.caption("Реализованы этапы 1–6 и 8 из 12")
         with st.expander("Расположение файлов"):
             st.write("Исходные отчёты")
             st.code(str(state.settings.source_dir), language=None)
@@ -277,6 +277,8 @@ def render_home() -> None:
                 render_quality_panel(state.settings.database_path, selected_id)
                 from hackalem.ui.cleaning_panel import render_cleaning_panel
                 render_cleaning_panel(state.settings.database_path, selected_id)
+                from hackalem.ui.forecast_panel import render_forecast_panel
+                render_forecast_panel(state.settings.database_path, selected_id)
 
     st.divider()
-    st.caption("Прогноз, расчёт заказов и экспорт будут добавлены на следующих этапах.")
+    st.caption("Прогноз доступен; восстановление упущенного спроса, расчёт заказов и экспорт ещё не реализованы.")
