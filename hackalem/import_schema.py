@@ -137,8 +137,17 @@ def schema_signature(connection, version=4):
         from hackalem.cleaning_schema import MIGRATION_5
         statements += MIGRATION_5
     if version >= 6:
-        from hackalem.forecast_schema import MIGRATION_6
+        from hackalem.lost_demand_schema import MIGRATION_6
         statements += MIGRATION_6
+    if version >= 7:
+        from hackalem.forecast_schema import MIGRATION_7
+        statements += MIGRATION_7
+    if version >= 8:
+        from hackalem.replenishment_schema import MIGRATION_8
+        statements += MIGRATION_8
+    if version >= 9:
+        from hackalem.orders_schema import MIGRATION_9
+        statements += MIGRATION_9
     tables = [statement.split()[2] for statement in statements if statement.startswith("CREATE TABLE")]
     return {
         table: connection.execute(f"PRAGMA table_info({table})").fetchall()

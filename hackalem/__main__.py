@@ -24,6 +24,12 @@ from hackalem.services.quality import (
 from hackalem.services.units import get_unit_assessment
 from hackalem.services.cleaning import cleaning_report, list_cleaning_runs, run_cleaning
 from hackalem.services.forecasting import forecast_report, list_forecast_runs, run_forecast
+from hackalem.services.lost_demand import lost_demand_report, list_lost_demand_runs, run_lost_demand
+from hackalem.services.replenishment import run_replenishment, replenishment_report
+from hackalem.services.orders import (
+    approve_order, create_order_project, export_order_file, order_report,
+    submit_order_for_review, update_order_item,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -80,12 +86,23 @@ def _parser() -> argparse.ArgumentParser:
     cleaning_report_command.add_argument("--limit", type=int, default=100)
     cleaning_runs = commands.add_parser("cleaning-runs", help="Показать версии подготовки снимка")
     cleaning_runs.add_argument("--snapshot", type=int, required=True)
+    lost = commands.add_parser("lost-demand", help="Оценить упущенный спрос по полнодневному наличию")
+    lost.add_argument("--cleaning-run", type=int, required=True)
+    lost.add_argument("--sku", required=True)
+    lost.add_argument("--scenario-evidence", type=Path, help="JSON-массив ручных интервалов; результат всегда сценарный")
+    lost_report = commands.add_parser("lost-demand-report", help="Показать сохранённую оценку и причины")
+    lost_report.add_argument("--run", type=int, required=True)
+    lost_report.add_argument("--limit", type=int, default=100)
+    lost_runs = commands.add_parser("lost-demand-runs", help="Показать оценки выбранной подготовки")
+    lost_runs.add_argument("--cleaning-run", type=int, required=True)
     forecast = commands.add_parser("forecast", help="Сохранить месячный прогноз одного SKU")
     forecast.add_argument("--quality-run", type=int, required=True)
     forecast.add_argument("--cleaning-run", type=int, required=True)
     forecast.add_argument("--sku", required=True)
     forecast.add_argument("--config", type=Path, required=True, help="JSON-настройка прогноза")
     forecast.add_argument("--allow-scenario", action="store_true")
+    forecast.add_argument("--lost-demand-run", type=int,
+                          help="Совместимая версия оценки потерь этапа 7")
     forecast_report_command = commands.add_parser("forecast-report", help="Показать сохранённый прогноз")
     forecast_report_command.add_argument("--run", type=int, required=True)
     forecast_runs = commands.add_parser("forecast-runs", help="Показать прогнозы снимка")
@@ -94,6 +111,33 @@ def _parser() -> argparse.ArgumentParser:
     evaluation = commands.add_parser("forecast-evaluate", help="Проверить прогнозы только по синтетическому эталону")
     evaluation.add_argument("--dataset", type=Path, required=True)
     evaluation.add_argument("--runs", type=int, nargs="+", required=True)
+    replenish = commands.add_parser("replenish", help="Сохранить сценарный расчёт пополнения из JSON")
+    replenish.add_argument("--file", type=Path, required=True)
+    replenish_report = commands.add_parser("replenishment-report", help="Воспроизвести сохранённый расчёт по run_id")
+    replenish_report.add_argument("--run", type=int, required=True)
+    replenish_report.add_argument("--sku")
+    order_create = commands.add_parser("order-create", help="Создать проект заказа из расчёта пополнения")
+    order_create.add_argument("--replenishment-run", type=int, required=True)
+    order_create.add_argument("--actor", required=True)
+    order_report_command = commands.add_parser("order-report", help="Показать версию проекта заказа")
+    order_report_command.add_argument("--version", type=int, required=True)
+    order_update = commands.add_parser("order-update", help="Сохранить количество менеджера по стабильному SKU")
+    order_update.add_argument("--version", type=int, required=True)
+    order_update.add_argument("--sku", required=True)
+    order_update.add_argument("--quantity", type=float, required=True)
+    order_update.add_argument("--actor", required=True)
+    order_update.add_argument("--reason", required=True)
+    order_submit = commands.add_parser("order-submit", help="Передать черновик заказа на проверку")
+    order_submit.add_argument("--version", type=int, required=True)
+    order_submit.add_argument("--actor", required=True)
+    order_submit.add_argument("--reason", required=True)
+    order_approve = commands.add_parser("order-approve", help="Зафиксировать локальное утверждение версии")
+    order_approve.add_argument("--version", type=int, required=True)
+    order_approve.add_argument("--responsible", required=True)
+    order_approve.add_argument("--note", required=True)
+    order_export = commands.add_parser("order-export", help="Выгрузить и проверить CSV/XLSX выбранной версии")
+    order_export.add_argument("--version", type=int, required=True)
+    order_export.add_argument("--output", type=Path, required=True)
     return parser
 
 
@@ -148,14 +192,39 @@ def main(argv: list[str] | None = None) -> int:
             result = cleaning_report(database_path, args.run, sku=args.sku, limit=args.limit)
         elif args.command == "cleaning-runs":
             result = list_cleaning_runs(database_path, args.snapshot)
+        elif args.command == "lost-demand":
+            evidence = json.loads(args.scenario_evidence.read_text(encoding="utf-8-sig")) if args.scenario_evidence else None
+            result = run_lost_demand(database_path, args.cleaning_run, args.sku, scenario_intervals=evidence)
+        elif args.command == "lost-demand-report":
+            result = lost_demand_report(database_path, args.run, limit=args.limit)
+        elif args.command == "lost-demand-runs":
+            result = list_lost_demand_runs(database_path, args.cleaning_run)
         elif args.command == "forecast":
             payload = json.loads(args.config.read_text(encoding="utf-8-sig"))
             result = run_forecast(database_path, args.quality_run, args.cleaning_run, args.sku,
-                                  payload, allow_scenario=args.allow_scenario)
+                                  payload, allow_scenario=args.allow_scenario,
+                                  lost_demand_run_id=args.lost_demand_run)
         elif args.command == "forecast-report":
             result = forecast_report(database_path, args.run)
         elif args.command == "forecast-runs":
             result = list_forecast_runs(database_path, args.snapshot, args.sku)
+        elif args.command == "replenish":
+            result = run_replenishment(database_path, json.loads(args.file.read_text(encoding="utf-8-sig")))
+        elif args.command == "replenishment-report":
+            result = replenishment_report(database_path, args.run, sku=args.sku)
+        elif args.command == "order-create":
+            result = create_order_project(database_path, args.replenishment_run, args.actor)
+        elif args.command == "order-report":
+            result = order_report(database_path, args.version)
+        elif args.command == "order-update":
+            result = update_order_item(database_path, args.version, args.sku,
+                                       args.quantity, args.actor, args.reason)
+        elif args.command == "order-submit":
+            result = submit_order_for_review(database_path, args.version, args.actor, args.reason)
+        elif args.command == "order-approve":
+            result = approve_order(database_path, args.version, args.responsible, args.note)
+        elif args.command == "order-export":
+            result = export_order_file(database_path, args.version, args.output)
         else:
             result = trace_cell(
                 database_path,

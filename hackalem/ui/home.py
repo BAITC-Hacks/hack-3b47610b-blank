@@ -2,10 +2,11 @@
 
 from pathlib import Path
 import sqlite3
+from datetime import date
 
 import streamlit as st
 
-from hackalem.config import load_settings
+from hackalem.config import PROJECT_ROOT, Settings, load_settings
 from hackalem.services.bootstrap import bootstrap
 from hackalem.services.imports import (
     SUPPLIERS,
@@ -188,14 +189,47 @@ def _render_lineage(database_path: Path, report: dict) -> None:
             st.json(result)
 
 
+def _reset_workspace_selection() -> None:
+    for key in list(st.session_state):
+        if key != "workspace_dataset":
+            del st.session_state[key]
+
+
+def _reset_calculation_selection() -> None:
+    for key in list(st.session_state):
+        if ((key.startswith("procurement_") or key.startswith("card_") or
+             key.startswith("scenario_")) and key.endswith(("_run_id", "_base"))):
+            st.session_state.pop(key, None)
+
+
+def _reset_snapshot_selection() -> None:
+    st.session_state.pop("selected_snapshot_id", None)
+    _reset_calculation_selection()
+
+
+def _dataset_options(current_path: Path) -> dict[str, dict]:
+    candidates = [current_path, PROJECT_ROOT / ".local" / "hackalem.sqlite3"]
+    candidates.extend(sorted((PROJECT_ROOT / ".local" / "synthetic").glob("*/model/hackalem.sqlite3")))
+    result = {}
+    for path in candidates:
+        path = path.resolve()
+        if path.exists() and str(path) not in result:
+            try:
+                result[str(path)] = dataset_context(path)
+            except (ValueError, OSError, sqlite3.Error):
+                continue
+    return result
+
+
 def render_home() -> None:
     st.set_page_config(page_title="Помощник закупщика", page_icon="📦", layout="wide")
     st.title("Помощник закупщика")
     st.caption("Электрокомплект · Локальный кабинет закупок")
 
     try:
-        state = bootstrap(load_settings())
-        dataset = dataset_context(state.settings.database_path)
+        settings = load_settings()
+        initial = bootstrap(settings)
+        datasets = _dataset_options(initial.settings.database_path)
     except (OSError, ValueError, sqlite3.Error, UnsupportedSchemaError) as error:
         st.error(f"Не удалось подготовить локальное хранилище: {error}")
         st.info("Проверьте пути и доступ к папкам. Исходные отчёты не изменяются.")
@@ -203,67 +237,95 @@ def render_home() -> None:
 
     with st.sidebar:
         st.markdown("**Рабочее пространство**")
+        selected_path = st.selectbox(
+            "Dataset", list(datasets), index=list(datasets).index(str(initial.settings.database_path.resolve())),
+            key="workspace_dataset", on_change=_reset_workspace_selection,
+            format_func=lambda value: (
+                f"{datasets[value]['label']} · {datasets[value]['dataset_id']} · {value}"
+            ),
+        )
+    try:
+        state = bootstrap(Settings(source_dir=settings.source_dir, data_dir=Path(selected_path).parent))
+        dataset = dataset_context(state.settings.database_path)
+    except (OSError, ValueError, sqlite3.Error, UnsupportedSchemaError) as error:
+        st.error(f"Не удалось открыть выбранный dataset: {error}")
+        st.stop()
+    with st.sidebar:
         st.write("Локальное хранилище подключено")
-        st.caption("Реализованы этапы 1–6 и 8 из 12")
+        st.caption("Реализованы этапы 1–11 из 12")
         with st.expander("Расположение файлов"):
             st.write("Исходные отчёты")
             st.code(str(state.settings.source_dir), language=None)
             st.write("Локальное хранилище")
             st.code(str(state.storage.path), language=None)
 
-    if not state.source_directory_exists:
-        st.warning(
-            "Папка исходных отчётов пока недоступна. "
-            "Укажите существующую папку в HACKALEM_SOURCE_DIR перед этапом импорта."
-        )
-
     if dataset['kind'] == 'synthetic':
         st.warning('СИНТЕТИЧЕСКИЙ ПРОВЕРОЧНЫЙ НАБОР — вымышленные товары, клиенты и условия. Для реальных закупок не применяется.')
         st.caption(f"Dataset: {dataset['dataset_id']}. Скрытый спрос и эталонные метки в интерфейс модели не загружаются.")
-    st.subheader("Данные поставщиков")
-    st.caption("Импорт сохраняет версии файлов, значения и их происхождение.")
-    supplier = st.selectbox("Поставщик для импорта", SUPPLIERS, key="import_supplier")
-    if st.button(
-        f"Импортировать {supplier}",
-        type="primary",
-        disabled=not state.source_directory_exists or dataset['kind'] == 'synthetic',
-    ):
-        try:
-            with st.spinner("Читаем отчёты и сохраняем снимок…"):
-                imported = import_supplier(state.settings, supplier)
-        except _SERVICE_ERRORS as error:
-            st.error(f"Не удалось импортировать отчёты: {error}")
-        else:
-            st.session_state["selected_snapshot_id"] = imported["snapshot_id"]
-            st.success(
-                f"Снимок № {imported['snapshot_id']} сохранён. "
-                f"Файлов без изменений: {imported.get('reused_files', 0)}."
-            )
-
     try:
         snapshots = list_snapshots(state.settings.database_path)
     except _SERVICE_ERRORS as error:
         st.error(f"Не удалось прочитать список снимков: {error}")
         st.stop()
 
-    if not snapshots:
-        st.info("Данные пока не загружены.")
-    else:
-        snapshots_by_id = {snapshot["id"]: snapshot for snapshot in snapshots}
-        if st.session_state.get("selected_snapshot_id") not in snapshots_by_id:
-            st.session_state.pop("selected_snapshot_id", None)
-        selected_id = st.selectbox(
-            "Снимок данных",
-            list(snapshots_by_id),
-            index=None,
-            placeholder="Выберите сохранённый снимок",
-            key="selected_snapshot_id",
-            format_func=lambda value: (
-                f"№ {value} · {snapshots_by_id[value]['supplier']} · {snapshots_by_id[value]['created_at_utc']} (UTC)"
-            ),
-        )
-        if selected_id is None:
-            st.info("Выберите снимок, чтобы проверить импорт и происхождение значений.")
+    suppliers = sorted({snapshot["supplier"] for snapshot in snapshots})
+    with st.sidebar:
+        supplier_filter = st.selectbox("Поставщик", ["Все", *suppliers], key="workspace_supplier",
+                                       on_change=_reset_snapshot_selection)
+        st.selectbox("Склад / охват", ["source_report"], key="workspace_scope",
+                     format_func=lambda _: "Весь охват выбранного отчёта")
+        default_date = date(2026, 1, 1) if dataset["kind"] == "synthetic" else date(2026, 9, 22)
+        calculation_date = st.date_input("Дата расчёта", value=default_date,
+                                         key=f"workspace_date_{dataset['dataset_id']}",
+                                         on_change=_reset_calculation_selection)
+    visible_snapshots = [row for row in snapshots if supplier_filter == "Все" or row["supplier"] == supplier_filter]
+    snapshots_by_id = {snapshot["id"]: snapshot for snapshot in visible_snapshots}
+    pending_snapshot_id = st.session_state.pop("_pending_snapshot_id", None)
+    if pending_snapshot_id in snapshots_by_id:
+        st.session_state["selected_snapshot_id"] = pending_snapshot_id
+    if st.session_state.get("selected_snapshot_id") not in snapshots_by_id:
+        st.session_state.pop("selected_snapshot_id", None)
+    selected_id = st.selectbox(
+        "Версия данных", list(snapshots_by_id), index=None,
+        placeholder="Выберите снимок поставщика", key="selected_snapshot_id",
+        format_func=lambda value: (
+            f"№ {value} · {snapshots_by_id[value]['supplier']} · "
+            f"{snapshots_by_id[value]['created_at_utc']} (UTC)"
+        ),
+    ) if snapshots_by_id else None
+
+    data_tab, recommendations_tab, card_tab, scenarios_tab, orders_tab = st.tabs([
+        "Данные и проверки", "Рекомендации", "Карточка товара", "Сценарии", "Заказы",
+    ])
+    with data_tab:
+        if not state.source_directory_exists:
+            st.warning("Папка исходных отчётов недоступна. Укажите HACKALEM_SOURCE_DIR; ошибка не скрыта.")
+        st.subheader("Данные поставщиков")
+        st.caption("Импорт сохраняет версии файлов, значения и их происхождение.")
+        import_success = st.session_state.pop("_import_success", None)
+        if import_success:
+            st.success(import_success)
+        import_supplier_name = st.selectbox("Поставщик для импорта", SUPPLIERS, key="import_supplier")
+        if st.button(
+            f"Импортировать {import_supplier_name}", type="primary",
+            disabled=not state.source_directory_exists or dataset['kind'] == 'synthetic',
+        ):
+            try:
+                with st.spinner("Читаем отчёты и сохраняем снимок…"):
+                    imported = import_supplier(state.settings, import_supplier_name)
+            except _SERVICE_ERRORS as error:
+                st.error(f"Не удалось импортировать отчёты: {error}")
+            else:
+                st.session_state["_pending_snapshot_id"] = imported["snapshot_id"]
+                st.session_state["_import_success"] = (
+                    f"Снимок № {imported['snapshot_id']} сохранён. "
+                    f"Файлов без изменений: {imported.get('reused_files', 0)}."
+                )
+                st.rerun()
+        if not snapshots:
+            st.info("Данные пока не загружены.")
+        elif selected_id is None:
+            st.info("Выберите версию данных, чтобы проверить импорт, параметры и происхождение.")
         else:
             try:
                 report = report_snapshot(state.settings.database_path, selected_id)
@@ -277,8 +339,31 @@ def render_home() -> None:
                 render_quality_panel(state.settings.database_path, selected_id)
                 from hackalem.ui.cleaning_panel import render_cleaning_panel
                 render_cleaning_panel(state.settings.database_path, selected_id)
+                from hackalem.ui.lost_demand_panel import render_lost_demand_panel
+                render_lost_demand_panel(state.settings.database_path, selected_id)
                 from hackalem.ui.forecast_panel import render_forecast_panel
                 render_forecast_panel(state.settings.database_path, selected_id)
+    from hackalem.ui.procurement_panel import (
+        render_orders, render_product_card, render_recommendations, render_scenarios,
+    )
+    if selected_id is None:
+        for tab, text in ((recommendations_tab, "Выберите версию данных для рекомендаций."),
+                          (card_tab, "Выберите версию данных и расчёт для карточки товара."),
+                          (scenarios_tab, "Выберите версию данных и базовый расчёт для сценария."),
+                          (orders_tab, "Выберите версию данных.")):
+            with tab:
+                st.info(text)
+    else:
+        supplier = snapshots_by_id[selected_id]["supplier"]
+        with recommendations_tab:
+            render_recommendations(state.settings.database_path, selected_id, supplier,
+                                   "all_selected_warehouses", calculation_date)
+        with card_tab:
+            render_product_card(state.settings.database_path, selected_id)
+        with scenarios_tab:
+            render_scenarios(state.settings.database_path, selected_id)
+        with orders_tab:
+            render_orders(state.settings.database_path, selected_id)
 
     st.divider()
-    st.caption("Прогноз доступен; восстановление упущенного спроса, расчёт заказов и экспорт ещё не реализованы.")
+    st.caption("Проекты, локальное утверждение и проверяемый экспорт доступны; отправки поставщику нет.")

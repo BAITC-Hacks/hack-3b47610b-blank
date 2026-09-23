@@ -142,7 +142,8 @@ def cleaning_report(database_path, run_id, *, sku=None, limit=100):
         return result
 
 
-def prepared_input(database_path, quality_run_id, cleaning_run_id, sku, *, allow_scenario=False):
+def prepared_input(database_path, quality_run_id, cleaning_run_id, sku, *, allow_scenario=False,
+                   allow_missing_order_constraints=False, allow_overdue_arrivals=False):
     """Require both versioned gates before a future forecast consumes prepared sales."""
     from hackalem.services.quality import ENOUGH, SCENARIO, quality_report
 
@@ -170,9 +171,16 @@ def prepared_input(database_path, quality_run_id, cleaning_run_id, sku, *, allow
                         "project_commitment_quantity": month["project_commitment_quantity"],
                         "cleaning_document_keys": month["source_document_keys"]})
     reasons = [reason for reason in original["reasons"] if not reason.startswith("NEGATIVE_SELECTED_SALES:")]
+    if allow_missing_order_constraints:
+        reasons = [reason for reason in reasons if reason not in (
+            "PARAMETER_MISSING: Не задан параметр minimum_order.",
+            "PARAMETER_MISSING: Не задан параметр order_multiple.")]
+    if allow_overdue_arrivals:
+        reasons = [reason for reason in reasons if not reason.startswith("ETA_OVERDUE:")]
     if reasons:
         raise ValueError("Не хватает данных: " + "; ".join(reasons))
-    status = SCENARIO if original["assumptions"] or checked["dataset"]["kind"] == "synthetic" else ENOUGH
+    status = SCENARIO if (original["assumptions"] or checked["dataset"]["kind"] == "synthetic" or
+                          ((allow_missing_order_constraints or allow_overdue_arrivals) and original["reasons"])) else ENOUGH
     if status == SCENARIO and allow_scenario is not True:
         raise ValueError("Сценарный расчёт не допускается в подтверждённый реальный заказ.")
     return {**original, "status": status, "eligible_for_calculation": True,

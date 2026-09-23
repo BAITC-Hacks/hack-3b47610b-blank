@@ -3,6 +3,7 @@
 import math
 import sqlite3
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,9 @@ from hackalem.domain.forecasting import add_month, forecast_monthly
 from hackalem.__main__ import main
 from hackalem.services.cleaning import run_cleaning
 from hackalem.services.forecasting import forecast_report, run_forecast
+from hackalem.services.lost_demand import run_lost_demand
 from hackalem.services.synthetic import create_synthetic_dataset, evaluate_forecasts, synthetic_report
+from hackalem.storage import SCHEMA_VERSION, initialize_database
 
 
 def _config(start="2026-01-01", *, fallback=None, growth_mode="replace_trend"):
@@ -117,6 +120,7 @@ def test_versioned_forecasts_are_repeatable_and_truth_is_evaluator_only(forecast
         "cleaning_refitted_per_origin": True,
         "model_parameters_refitted_per_origin": True,
         "manual_decisions_replayed": False,
+        "lost_demand_adjustment_is_causal": False,
         "oracle_used_by_model": False,
     }
     assert report["summary"]["seasonal_aggregate_decision"]["use"] is False
@@ -144,6 +148,21 @@ def test_new_product_fallback_is_visible_and_never_claims_measured_superiority(f
     assert any("Короткая история" in text for text in report["summary"]["limitations"])
 
 
+def test_lost_demand_version_feeds_forecast_without_becoming_backlog(forecast_dataset):
+    dataset, snapshot, cleaning, _ = forecast_dataset
+    lost = run_lost_demand(dataset["database_path"], cleaning["run_id"], "SYN-A-009")
+    report = run_forecast(
+        dataset["database_path"], snapshot["run_id"], cleaning["run_id"], "SYN-A-009",
+        _config(), allow_scenario=True, lost_demand_run_id=lost["run_id"],
+    )
+    assert report["lost_demand_run_id"] == lost["run_id"]
+    assert report["summary"]["lost_demand_input"] == {
+        "run_id": lost["run_id"], "applied": True,
+        "historical_lost_demand_as_current_backlog": 0,
+    }
+    assert report["summary"]["training_protocol"]["lost_demand_adjustment_is_causal"] is True
+
+
 def test_forecast_cli_reuses_version_and_reports_json(forecast_dataset, tmp_path, monkeypatch, capsys):
     dataset, snapshot, cleaning, runs = forecast_dataset
     config_path = tmp_path / "forecast.json"
@@ -156,3 +175,22 @@ def test_forecast_cli_reuses_version_and_reports_json(forecast_dataset, tmp_path
     assert output["run_id"] == runs["SYN-A-001"]
     assert main(["forecast-report", "--run", str(output["run_id"])]) == 0
     assert json.loads(capsys.readouterr().out)["summary"]["selected_model"] is not None
+
+
+def test_published_forecast_schema6_migrates_without_losing_runs(forecast_dataset, tmp_path):
+    dataset, _, _, runs = forecast_dataset
+    target = tmp_path / "legacy-forecast.sqlite3"
+    shutil.copyfile(dataset["database_path"], target)
+    with sqlite3.connect(target) as connection:
+        for table in ("order_events", "order_items", "order_versions", "order_projects",
+                      "replenishment_items", "replenishment_runs",
+                      "lost_demand_days", "lost_demand_months", "lost_demand_runs"):
+            connection.execute(f"DROP TABLE {table}")
+        connection.execute("ALTER TABLE forecast_runs DROP COLUMN lost_demand_run_id")
+        connection.execute("PRAGMA user_version=6")
+    assert initialize_database(target).schema_version == SCHEMA_VERSION == 9
+    assert initialize_database(target).schema_version == SCHEMA_VERSION
+    assert forecast_report(target, runs["SYN-A-001"])["sku"] == "SYN-A-001"
+    with sqlite3.connect(target) as connection:
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert connection.execute("SELECT lost_demand_run_id FROM forecast_runs LIMIT 1").fetchone()[0] is None

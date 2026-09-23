@@ -1,4 +1,4 @@
-"""Safe initialization and the additive migration from stage 1 metadata."""
+"""Safe initialization and additive migrations for all implemented stages."""
 
 import sqlite3
 from contextlib import closing
@@ -6,12 +6,15 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from hackalem.import_schema import MIGRATION_3, SCHEMA_SQL, schema_signature
-from hackalem.quality_schema import MIGRATION_4
 from hackalem.cleaning_schema import MIGRATION_5
-from hackalem.forecast_schema import MIGRATION_6
+from hackalem.forecast_schema import LEGACY_MIGRATION_6, LINK_LOST_DEMAND, MIGRATION_7
+from hackalem.import_schema import MIGRATION_3, SCHEMA_SQL
+from hackalem.lost_demand_schema import MIGRATION_6
+from hackalem.orders_schema import MIGRATION_9
+from hackalem.quality_schema import MIGRATION_4
+from hackalem.replenishment_schema import MIGRATION_8
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 9
 
 
 class UnsupportedSchemaError(RuntimeError):
@@ -24,12 +27,72 @@ class StorageInfo:
     schema_version: int
 
 
+def _tables(statements):
+    return [statement.split()[2] for statement in statements if statement.startswith("CREATE TABLE")]
+
+
+def _signature(connection, statements):
+    return {table: connection.execute(f"PRAGMA table_info({table})").fetchall()
+            for table in _tables(statements)}
+
+
+def _expected_statements(version, names):
+    statements = list(SCHEMA_SQL)
+    if version >= 3:
+        statements += MIGRATION_3
+    if version >= 4:
+        statements += MIGRATION_4
+    if version >= 5:
+        statements += MIGRATION_5
+    if version == 6 and "forecast_runs" in names and "lost_demand_runs" not in names:
+        return statements + LEGACY_MIGRATION_6
+    if version >= 6:
+        statements += MIGRATION_6
+    if version == 7 and "replenishment_runs" in names and "forecast_runs" not in names:
+        return statements + MIGRATION_8
+    if version >= 7:
+        statements += MIGRATION_7
+    if version >= 8:
+        statements += MIGRATION_8
+    if version >= 9:
+        statements += MIGRATION_9
+    return statements
+
+
+def _pending_statements(version, names):
+    if version < 2:
+        return (SCHEMA_SQL + MIGRATION_3 + MIGRATION_4 + MIGRATION_5 +
+                MIGRATION_6 + MIGRATION_7 + MIGRATION_8 + MIGRATION_9)
+    statements = []
+    if version < 3:
+        statements += MIGRATION_3
+    if version < 4:
+        statements += MIGRATION_4
+    if version < 5:
+        statements += MIGRATION_5
+    legacy_forecast = version == 6 and "forecast_runs" in names and "lost_demand_runs" not in names
+    legacy_replenishment = (version == 7 and "replenishment_runs" in names and
+                            "forecast_runs" not in names)
+    if version < 6 or legacy_forecast:
+        statements += MIGRATION_6
+    if version < 7:
+        statements += LINK_LOST_DEMAND if legacy_forecast else MIGRATION_7
+    elif legacy_replenishment:
+        statements += MIGRATION_7
+    if version < 8 and not legacy_replenishment:
+        statements += MIGRATION_8
+    if version < 9:
+        statements += MIGRATION_9
+    return statements
+
+
 def initialize_database(path: Path) -> StorageInfo:
-    """Create metadata once and leave existing metadata intact on every rerun."""
+    """Create metadata once and migrate known variants without losing facts."""
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(path, timeout=10)) as connection:
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (0, 1, 2, 3, 4, 5, SCHEMA_VERSION):
+        if version not in range(SCHEMA_VERSION + 1):
             raise UnsupportedSchemaError(
                 f"Версия базы {version} не поддерживается; ожидается {SCHEMA_VERSION}. "
                 "Существующая база не изменена."
@@ -37,16 +100,15 @@ def initialize_database(path: Path) -> StorageInfo:
         objects = connection.execute(
             "SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
         ).fetchall()
+        names = {name for (name,) in objects}
         if version == 0 and objects:
             raise UnsupportedSchemaError(
                 "Выбранная база уже содержит неизвестные данные. "
                 "Выберите отдельную папку хранилища; база не изменена."
             )
-        if version in (1, 2, 3, 4, 5, SCHEMA_VERSION):
-            columns = [
-                (row[1], row[2].upper(), row[3], row[5])
-                for row in connection.execute("PRAGMA table_info(app_metadata)")
-            ]
+        if version >= 1:
+            columns = [(row[1], row[2].upper(), row[3], row[5])
+                       for row in connection.execute("PRAGMA table_info(app_metadata)")]
             if columns != [("key", "TEXT", 0, 1), ("value", "TEXT", 1, 0)]:
                 raise UnsupportedSchemaError(
                     "Структура существующей базы не распознана. База не изменена."
@@ -57,35 +119,21 @@ def initialize_database(path: Path) -> StorageInfo:
                 raise UnsupportedSchemaError(
                     "В базе отсутствуют метаданные приложения. База не изменена."
                 )
-        if version in (2, 3, 4, 5, SCHEMA_VERSION):
+        if version >= 2:
+            expected_statements = _expected_statements(version, names)
             with closing(sqlite3.connect(":memory:")) as expected:
-                for statement in SCHEMA_SQL:
+                for statement in expected_statements:
                     expected.execute(statement)
-                if version >= 3:
-                    for statement in MIGRATION_3:
-                        expected.execute(statement)
-                if version >= 4:
-                    for statement in MIGRATION_4:
-                        expected.execute(statement)
-                if version >= 5:
-                    for statement in MIGRATION_5:
-                        expected.execute(statement)
-                if version >= 6:
-                    for statement in MIGRATION_6:
-                        expected.execute(statement)
-                if schema_signature(connection, version) != schema_signature(expected, version):
+                if _signature(connection, expected_statements) != _signature(expected, expected_statements):
                     raise UnsupportedSchemaError(
                         "Структура импортов не распознана. База не изменена."
                     )
             if version == SCHEMA_VERSION:
                 return StorageInfo(path=path, schema_version=SCHEMA_VERSION)
-        new_statements = ((SCHEMA_SQL if version < 2 else [])
-                          + (MIGRATION_3 if version < 3 else [])
-                          + (MIGRATION_4 if version < 4 else [])
-                          + (MIGRATION_5 if version < 5 else []) + MIGRATION_6)
-        if version in (1, 2, 3, 4, 5):
-            reserved = {statement.split()[2] for statement in new_statements if statement.startswith("CREATE")}
-            if reserved.intersection(name for (name,) in objects):
+        new_statements = _pending_statements(version, names)
+        if version >= 1:
+            reserved = set(_tables(new_statements))
+            if reserved.intersection(names):
                 raise UnsupportedSchemaError(
                     "Имена таблиц новой схемы заняты. База не изменена."
                 )
@@ -93,8 +141,7 @@ def initialize_database(path: Path) -> StorageInfo:
         with connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
-                "CREATE TABLE IF NOT EXISTS app_metadata ("
-                "key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+                "CREATE TABLE IF NOT EXISTS app_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
             )
             connection.execute(
                 "INSERT OR IGNORE INTO app_metadata(key, value) VALUES (?, ?)",

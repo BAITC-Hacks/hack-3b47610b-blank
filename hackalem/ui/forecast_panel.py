@@ -11,6 +11,7 @@ from hackalem.services.forecasting import (
     forecast_config_template, forecast_report, list_forecast_runs, run_forecast,
 )
 from hackalem.services.quality import list_quality_runs
+from hackalem.services.lost_demand import list_lost_demand_runs
 
 
 _ERRORS = (ValueError, OSError, sqlite3.Error, RuntimeError)
@@ -36,6 +37,14 @@ def render_forecast_panel(database_path: Path, snapshot_id: int) -> None:
                               index=None, key=f"{scope}_quality")
     cleaning_id = st.selectbox("Подготовка спроса для прогноза", [row["id"] for row in cleaning],
                                index=None, key=f"{scope}_cleaning")
+    lost_runs = list_lost_demand_runs(database_path, cleaning_id) if cleaning_id is not None else []
+    lost_by_id = {row["id"]: row for row in lost_runs}
+    lost_demand_run_id = st.selectbox(
+        "Оценка упущенного спроса этапа 7 (необязательно)",
+        [None, *lost_by_id], key=f"{scope}_lost_demand",
+        format_func=lambda value: "Без поправки этапа 7" if value is None else
+        f"№ {value} · {lost_by_id[value]['sku']} · {lost_by_id[value]['as_of']}",
+    )
     sku = st.text_input("Код товара для прогноза", key=f"{scope}_sku").strip()
     template = forecast_config_template(cleaning[0]["as_of"])
     config_text = st.text_area("Настройка прогноза (JSON)",
@@ -49,7 +58,8 @@ def render_forecast_panel(database_path: Path, snapshot_id: int) -> None:
                 raise ValueError("Выберите обе версии входов и укажите SKU.")
             config = json.loads(config_text)
             result = run_forecast(database_path, quality_id, cleaning_id, sku, config,
-                                  allow_scenario=allow_scenario)
+                                  allow_scenario=allow_scenario,
+                                  lost_demand_run_id=lost_demand_run_id)
         except (json.JSONDecodeError, ValueError, OSError, sqlite3.Error, RuntimeError) as error:
             st.error(f"Прогноз не сохранён: {error}")
         else:
@@ -83,4 +93,5 @@ def render_forecast_panel(database_path: Path, snapshot_id: int) -> None:
         st.json({"model_selection": summary["model_selection"], "baselines": summary["baselines"],
                  "training_protocol": summary["training_protocol"], "limitations": summary["limitations"],
                  "growth_decision": summary["growth_decision"],
+                 "lost_demand_input": summary["lost_demand_input"],
                  "seasonal_aggregate_decision": summary["seasonal_aggregate_decision"]})

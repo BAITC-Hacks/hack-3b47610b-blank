@@ -10,6 +10,7 @@ from hackalem.domain.cleaning import aggregate_months, classify_documents
 from hackalem.domain.forecasting import RULES_VERSION, add_month, forecast_monthly, validate_config
 from hackalem.services.cleaning import cleaning_report, prepared_input
 from hackalem.services.datasets import dataset_context
+from hackalem.services.lost_demand import adjusted_history
 from hackalem.services.systeme import _code_manifest, _connect, _hash, _json, _now, _snapshot
 from hackalem.storage import initialize_database
 
@@ -62,7 +63,8 @@ def _origin_histories(documents: list[dict], periods: list[str], policy: str,
 
 
 def run_forecast(database_path: Path, quality_run_id: int, cleaning_run_id: int,
-                 sku: str, config: dict, *, allow_scenario: bool = False) -> dict:
+                 sku: str, config: dict, *, allow_scenario: bool = False,
+                 lost_demand_run_id: int | None = None) -> dict:
     database_path = Path(database_path)
     initialize_database(database_path)
     config = validate_config(config)
@@ -72,6 +74,16 @@ def run_forecast(database_path: Path, quality_run_id: int, cleaning_run_id: int,
     preparation = cleaning_report(database_path, cleaning_run_id, sku=sku, limit=1)
     history = [{"period": row["period"], "quantity": row["quantity"], "state": row["state"]}
                for row in checked["history"]]
+    lost_input = None
+    if lost_demand_run_id is not None:
+        lost_input = adjusted_history(database_path, lost_demand_run_id)
+        if (lost_input["snapshot_id"] != checked["snapshot_id"] or lost_input["sku"] != sku or
+                lost_input["as_of"] != preparation["as_of"]):
+            raise ValueError("Оценка упущенного спроса относится к другому снимку, SKU или срезу.")
+        adjusted = {row["period"]: row["quantity"] for row in lost_input["history"]}
+        if set(adjusted) != {row["period"] for row in history}:
+            raise ValueError("Периоды оценки упущенного спроса не совпадают с подготовленной историей.")
+        history = [{**row, "quantity": adjusted[row["period"]]} for row in history]
     if not history:
         raise ValueError("Для прогноза нет завершённой подготовленной истории.")
     as_of_month = preparation["as_of"][:7] + "-01"
@@ -88,6 +100,10 @@ def run_forecast(database_path: Path, quality_run_id: int, cleaning_run_id: int,
     origins = _origin_histories(
         documents, [row["period"] for row in history], preparation["policy"], preparation["decisions"],
     )
+    if lost_input is not None:
+        adjusted = {row["period"]: row["quantity"] for row in lost_input["history"]}
+        origins = {origin: [{**row, "quantity": adjusted[row["period"]]} for row in rows]
+                   for origin, rows in origins.items()}
     result = forecast_monthly(
         history, forecast_start, config,
         business_growth=growth_entry["value"], category_code=category_entry["value"],
@@ -100,7 +116,13 @@ def run_forecast(database_path: Path, quality_run_id: int, cleaning_run_id: int,
         result["model_selection"]["measured"] = False
         result["model_selection"]["outperforms_best_baseline"] = False
         result["model_selection"]["reason"] = "manual_decisions_without_historical_effective_date"
-    input_is_scenario = checked["status"] == "Сценарный расчёт"
+    if lost_input is None:
+        result["limitations"].append(
+            "Версия этапа 7 не указана: прогноз использует наблюдаемый регулярный спрос без поправки на доказанный stockout."
+        )
+    input_is_scenario = checked["status"] == "Сценарный расчёт" or bool(
+        lost_input and lost_input["scenario"]
+    )
     policy_is_scenario = config["growth_application"]["status"] == "scenario" or (
         config["short_history_fallback"] is not None
         and config["short_history_fallback"]["status"] == "scenario"
@@ -118,6 +140,9 @@ def run_forecast(database_path: Path, quality_run_id: int, cleaning_run_id: int,
                      "label": parameters["category_label"]["value"],
                      "stock_policy": parameters["stock_policy"]},
         "growth_decision": {"parameter": growth_entry, "application": config["growth_application"]},
+        "lost_demand_input": {"run_id": lost_demand_run_id,
+                              "applied": lost_input is not None,
+                              "historical_lost_demand_as_current_backlog": 0},
         "seasonal_aggregate_decision": config["seasonal_aggregate_policy"],
         "training_protocol": {
             "current_month_excluded": True,
@@ -125,12 +150,14 @@ def run_forecast(database_path: Path, quality_run_id: int, cleaning_run_id: int,
             "cleaning_refitted_per_origin": True,
             "model_parameters_refitted_per_origin": True,
             "manual_decisions_replayed": bool(preparation["decisions"]),
+            "lost_demand_adjustment_is_causal": lost_input is not None,
             "oracle_used_by_model": False,
         },
     })
     code_version, _ = _code_manifest()
     fingerprint = _hash(_json({
-        "quality_run": quality_run_id, "cleaning_run": cleaning_run_id, "sku": sku,
+        "quality_run": quality_run_id, "cleaning_run": cleaning_run_id,
+        "lost_demand_run": lost_demand_run_id, "sku": sku,
         "config": config, "rules": RULES_VERSION, "code": code_version,
     }).encode())
     with closing(_connect(database_path)) as connection, connection:
@@ -144,10 +171,11 @@ def run_forecast(database_path: Path, quality_run_id: int, cleaning_run_id: int,
         else:
             run_id = connection.execute(
                 """INSERT INTO forecast_runs
-                (snapshot_id,quality_run_id,cleaning_run_id,sku,fingerprint,created_at_utc,as_of,
+                (snapshot_id,quality_run_id,cleaning_run_id,lost_demand_run_id,sku,fingerprint,created_at_utc,as_of,
                  rules_version,code_version,status,selected_model,config_json,summary_json)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (checked["snapshot_id"], quality_run_id, cleaning_run_id, sku, fingerprint, _now(),
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (checked["snapshot_id"], quality_run_id, cleaning_run_id, lost_demand_run_id,
+                 sku, fingerprint, _now(),
                  preparation["as_of"], RULES_VERSION, code_version, status, result["selected_model"],
                  _json(config), _json(result)),
             ).lastrowid
