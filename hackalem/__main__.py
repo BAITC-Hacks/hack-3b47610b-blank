@@ -22,6 +22,7 @@ from hackalem.services.quality import (
     save_configuration,
 )
 from hackalem.services.units import get_unit_assessment
+from hackalem.services.cleaning import cleaning_report, list_cleaning_runs, run_cleaning
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -67,6 +68,17 @@ def _parser() -> argparse.ArgumentParser:
     synthetic.add_argument("--output-root", type=Path, help="Родительская папка наборов; по умолчанию .local/synthetic")
     synthetic_report = commands.add_parser("synthetic-report", help="Проверить целостность синтетического dataset и показать готовность")
     synthetic_report.add_argument("--dataset", type=Path, required=True)
+    cleaning = commands.add_parser("clean", help="Сохранить отдельную версию подготовки регулярного спроса")
+    cleaning.add_argument("--snapshot", type=int, required=True)
+    cleaning.add_argument("--as-of", required=True, help="Дата среза YYYY-MM-DD; текущий месяц исключается")
+    cleaning.add_argument("--policy", choices=("review_only", "exclude_high_confidence"), default="review_only")
+    cleaning.add_argument("--decisions", type=Path, help="JSON-массив ручных решений в UTF-8")
+    cleaning_report_command = commands.add_parser("cleaning-report", help="Показать подготовленные документы и месяцы")
+    cleaning_report_command.add_argument("--run", type=int, required=True)
+    cleaning_report_command.add_argument("--sku")
+    cleaning_report_command.add_argument("--limit", type=int, default=100)
+    cleaning_runs = commands.add_parser("cleaning-runs", help="Показать версии подготовки снимка")
+    cleaning_runs.add_argument("--snapshot", type=int, required=True)
     return parser
 
 
@@ -107,6 +119,14 @@ def main(argv: list[str] | None = None) -> int:
             result = save_configuration(database_path, args.snapshot, payload)
         elif args.command == "configs":
             result = list_configurations(database_path, args.snapshot)
+        elif args.command == "clean":
+            decisions = json.loads(args.decisions.read_text(encoding="utf-8-sig")) if args.decisions else []
+            result = run_cleaning(database_path, args.snapshot, args.as_of,
+                                  policy=args.policy, decisions=decisions)
+        elif args.command == "cleaning-report":
+            result = cleaning_report(database_path, args.run, sku=args.sku, limit=args.limit)
+        elif args.command == "cleaning-runs":
+            result = list_cleaning_runs(database_path, args.snapshot)
         else:
             result = trace_cell(
                 database_path,

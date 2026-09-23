@@ -275,6 +275,8 @@ def render_home() -> None:
                 _render_units(state.settings.database_path, report)
                 from hackalem.ui.quality_panel import render_quality_panel
                 render_quality_panel(state.settings.database_path, selected_id)
+                from hackalem.ui.cleaning_panel import render_cleaning_panel
+                render_cleaning_panel(state.settings.database_path, selected_id)
 
     st.divider()
     st.caption("Прогноз, расчёт заказов и экспорт будут добавлены на следующих этапах.")

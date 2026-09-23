@@ -133,6 +133,9 @@ def schema_signature(connection, version=4):
     if version >= 4:
         from hackalem.quality_schema import MIGRATION_4
         statements += MIGRATION_4
+    if version >= 5:
+        from hackalem.cleaning_schema import MIGRATION_5
+        statements += MIGRATION_5
     tables = [statement.split()[2] for statement in statements if statement.startswith("CREATE TABLE")]
     return {
         table: connection.execute(f"PRAGMA table_info({table})").fetchall()
