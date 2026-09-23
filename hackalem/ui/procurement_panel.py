@@ -47,7 +47,11 @@ def _run_key(snapshot_id):
 
 
 def _clear_run(snapshot_id):
-    st.session_state.pop(_run_key(snapshot_id), None)
+    # New calculation inputs invalidate active uses across all purchaser tabs.
+    # Saved runs and order versions remain available for deliberate reselection.
+    for key in (_run_key(snapshot_id), f"card_{snapshot_id}_run_id",
+                f"scenario_{snapshot_id}_base", f"order_{snapshot_id}_source_run"):
+        st.session_state.pop(key, None)
 
 
 def _run_selector(database_path, snapshot_id, label="Версия расчёта", *, widget_key=None):

@@ -225,7 +225,7 @@ def forecast_monthly(history: list[dict], forecast_start: str, config: dict, *,
 
     limitations = [
         "Сезонные агрегаты поставщика исключены: единица и связь с SKU не установлены.",
-        "Этап 7 не реализован: цензурированные продажи не восстановлены без отдельного проверенного входа.",
+        "Коррекция отсутствия товара требует отдельной проверенной истории; модель сама не определяет дни stockout.",
     ]
     fallback = config["short_history_fallback"]
     if len(values) < 12:

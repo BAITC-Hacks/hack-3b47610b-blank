@@ -95,6 +95,23 @@ def run_forecast(database_path: Path, quality_run_id: int, cleaning_run_id: int,
     parameters = checked["parameters"]
     growth_entry = parameters["business_growth"]
     category_entry = parameters["category_code"]
+    # The referenced input versions are immutable. Reuse only after validating
+    # their compatibility and the caller's current scenario permission; refitting
+    # every rolling origin before this lookup made identical requests expensive.
+    code_version, _ = _code_manifest()
+    fingerprint = _hash(_json({
+        "quality_run": quality_run_id, "cleaning_run": cleaning_run_id,
+        "lost_demand_run": lost_demand_run_id, "sku": sku,
+        "config": config, "rules": RULES_VERSION, "code": code_version,
+    }).encode())
+    with closing(_connect(database_path)) as connection:
+        prior = connection.execute(
+            "SELECT id,status FROM forecast_runs WHERE fingerprint=?", (fingerprint,),
+        ).fetchone()
+    if prior:
+        if prior["status"] == "Сценарный прогноз" and allow_scenario is not True:
+            raise ValueError("Сценарный прогноз требует явного allow_scenario=True.")
+        return forecast_report(database_path, prior["id"])
     with closing(_connect(database_path)) as connection:
         documents = _documents(connection, cleaning_run_id, sku)
     origins = _origin_histories(
@@ -154,12 +171,6 @@ def run_forecast(database_path: Path, quality_run_id: int, cleaning_run_id: int,
             "oracle_used_by_model": False,
         },
     })
-    code_version, _ = _code_manifest()
-    fingerprint = _hash(_json({
-        "quality_run": quality_run_id, "cleaning_run": cleaning_run_id,
-        "lost_demand_run": lost_demand_run_id, "sku": sku,
-        "config": config, "rules": RULES_VERSION, "code": code_version,
-    }).encode())
     with closing(_connect(database_path)) as connection, connection:
         prior = connection.execute("SELECT id FROM forecast_runs WHERE fingerprint=?", (fingerprint,)).fetchone()
         if prior:

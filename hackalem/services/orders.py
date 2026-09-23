@@ -120,29 +120,33 @@ def _version_row(connection, version_id):
 def order_report(database_path, version_id):
     initialize_database(Path(database_path))
     with closing(_connect(database_path)) as connection:
-        result = _version_row(connection, version_id)
-        result["version_id"] = result.pop("id")
-        result["dataset"] = json.loads(result.pop("dataset_json"))
-        result["status_label"] = STATUS_LABELS[result["status"]]
-        snapshot = result.pop("approval_snapshot_json")
-        result["approval_snapshot"] = json.loads(snapshot) if snapshot else None
-        rows = connection.execute(
-            "SELECT * FROM order_items WHERE version_id=? ORDER BY sku", (version_id,),
-        )
-        result["items"] = []
-        for row in rows:
-            item = dict(row)
-            item["source"] = json.loads(item.pop("source_payload_json"))
-            result["items"].append(item)
-        events = connection.execute(
-            "SELECT * FROM order_events WHERE version_id=? ORDER BY id", (version_id,),
-        )
-        result["events"] = []
-        for row in events:
-            event = dict(row)
-            event["payload"] = json.loads(event.pop("payload_json"))
-            result["events"].append(event)
-        return result
+        return _read_order_report(connection, version_id)
+
+
+def _read_order_report(connection, version_id):
+    result = _version_row(connection, version_id)
+    result["version_id"] = result.pop("id")
+    result["dataset"] = json.loads(result.pop("dataset_json"))
+    result["status_label"] = STATUS_LABELS[result["status"]]
+    snapshot = result.pop("approval_snapshot_json")
+    result["approval_snapshot"] = json.loads(snapshot) if snapshot else None
+    rows = connection.execute(
+        "SELECT * FROM order_items WHERE version_id=? ORDER BY sku", (version_id,),
+    )
+    result["items"] = []
+    for row in rows:
+        item = dict(row)
+        item["source"] = json.loads(item.pop("source_payload_json"))
+        result["items"].append(item)
+    events = connection.execute(
+        "SELECT * FROM order_events WHERE version_id=? ORDER BY id", (version_id,),
+    )
+    result["events"] = []
+    for row in events:
+        event = dict(row)
+        event["payload"] = json.loads(event.pop("payload_json"))
+        result["events"].append(event)
+    return result
 
 
 def list_order_versions(database_path, snapshot_id=None):
@@ -223,6 +227,7 @@ def update_order_item(database_path, version_id, sku, selected_quantity, actor, 
         version_id = report["version_id"]
     changed_at = _now()
     with closing(_connect(database_path)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
         version = _version_row(connection, version_id)
         if version["status"] == "approved":
             raise ValueError("Утверждённая версия неизменяема.")
@@ -256,6 +261,7 @@ def submit_order_for_review(database_path, version_id, actor, reason):
     reason = _required_text(reason, "Причина передачи на проверку")
     submitted_at = _now()
     with closing(_connect(database_path)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
         version = _version_row(connection, version_id)
         if version["status"] != "draft":
             raise ValueError("На проверку можно передать только черновик.")
@@ -324,6 +330,11 @@ def approve_order(database_path, version_id, responsible, note):
         )} for item in report["items"]],
     }
     with closing(_connect(database_path)) as connection, connection:
+        # Compare the exact reviewed content under the same write lock as approval.
+        # A manager may have changed and resubmitted it while the snapshot was built.
+        connection.execute("BEGIN IMMEDIATE")
+        if _read_order_report(connection, version_id) != report:
+            raise ValueError("Версия уже изменена; обновите проект перед утверждением.")
         cursor = connection.execute(
             """UPDATE order_versions SET status='approved',approved_at_utc=?,responsible=?,
                approval_note=?,approval_snapshot_json=? WHERE id=? AND status='review'
@@ -367,7 +378,9 @@ def _csv_text(value):
     if value is None:
         return ""
     text = str(value)
-    if text.startswith(("=", "+", "-", "@")) or (len(text) > 1 and text[0] == "0" and text.isdigit()):
+    if (text.lstrip().startswith(("=", "+", "-", "@")) or
+            text.startswith(("\t", "\r", "\n")) or
+            (len(text) > 1 and text[0] == "0" and text.isdigit())):
         return "'" + text
     return text
 
@@ -409,6 +422,21 @@ def _verify_rows(actual, expected):
                 raise RuntimeError(f"Проверка экспорта: строка {index}, поле {column} изменилось.")
 
 
+def _metadata_rows(metadata):
+    """Keep complete JSON snapshots below Excel's 32767-character cell limit.
+
+    Parts are ordered by parameter and numbered for lossless concatenation.
+    16000 code points also fit when every character needs a UTF-16 surrogate pair.
+    """
+    rows = []
+    for key, value in sorted(metadata.items()):
+        value = _json(value) if isinstance(value, (dict, list)) else value
+        parts = ([value[index:index + 16000] for index in range(0, len(value), 16000)]
+                 if isinstance(value, str) and value else [value])
+        rows.extend((key, part, index, len(parts)) for index, part in enumerate(parts, 1))
+    return rows
+
+
 def build_order_export(database_path, version_id, file_format):
     """Build and immediately re-read CSV/XLSX bytes before returning them."""
     if file_format not in {"csv", "xlsx"}:
@@ -446,9 +474,15 @@ def build_order_export(database_path, version_id, file_format):
                         cell.value = str(cell.value)
                         cell.data_type = "s"
         meta = workbook.create_sheet("Метаданные")
-        meta.append(("Параметр", "Значение"))
-        for key, value in sorted(metadata.items()):
-            meta.append((key, _json(value) if isinstance(value, (dict, list)) else value))
+        meta.append(("Параметр", "Значение", "Часть", "Всего частей"))
+        metadata_rows = _metadata_rows(metadata)
+        for row in metadata_rows:
+            meta.append(row)
+        for row in meta.iter_rows():
+            for cell in row:
+                if isinstance(cell.value, str):
+                    cell.number_format = "@"
+                    cell.data_type = "s"
         output = io.BytesIO()
         workbook.save(output)
         content = output.getvalue()
@@ -456,6 +490,15 @@ def build_order_export(database_path, version_id, file_format):
         values = list(checked["Заказ"].iter_rows(values_only=True))
         actual = [dict(zip(EXPORT_COLUMNS, row)) for row in values[1:]]
         _verify_rows(actual, rows)
+        actual_metadata = list(checked["Метаданные"].iter_rows(min_row=2, values_only=True))
+        expected_metadata = [tuple(None if value == "" else value for value in row)
+                             for row in metadata_rows]
+        if actual_metadata != expected_metadata:
+            raise RuntimeError("Проверка экспорта: метаданные утверждённой версии изменились.")
+        if any(cell.data_type == "f" for worksheet in checked
+               for row in worksheet for cell in row):
+            raise RuntimeError("Проверка экспорта: текст был преобразован в формулу.")
+        checked.close()
         media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     filename = f"order-{report['project_id']}-v{report['version_number']}-{metadata['classification'].lower()}.{file_format}"
     return {"content": content, "filename": filename, "media_type": media_type,

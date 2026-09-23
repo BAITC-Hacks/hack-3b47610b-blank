@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from hackalem.services import forecasting as forecast_service
 from hackalem.domain.forecasting import add_month, forecast_monthly
 from hackalem.__main__ import main
 from hackalem.services.cleaning import run_cleaning
@@ -146,6 +147,63 @@ def test_new_product_fallback_is_visible_and_never_claims_measured_superiority(f
     assert report["summary"]["history_months"] == 3
     assert report["summary"]["model_selection"]["measured"] is False
     assert any("Короткая история" in text for text in report["summary"]["limitations"])
+
+
+def test_forecast_repeat_reuses_model_only_after_input_validation(forecast_dataset, monkeypatch):
+    dataset, snapshot, cleaning, runs = forecast_dataset
+
+    def unexpected_refit(*args, **kwargs):
+        pytest.fail("An identical persisted forecast must not re-read documents or refit the model")
+
+    monkeypatch.setattr(forecast_service, "_documents", unexpected_refit)
+    monkeypatch.setattr(forecast_service, "_origin_histories", unexpected_refit)
+    monkeypatch.setattr(forecast_service, "forecast_monthly", unexpected_refit)
+    repeated = run_forecast(dataset["database_path"], snapshot["run_id"], cleaning["run_id"],
+                            "SYN-A-001", _config(), allow_scenario=True)
+    assert repeated["run_id"] == runs["SYN-A-001"]
+    with pytest.raises(ValueError, match="Сценарный расчёт"):
+        run_forecast(dataset["database_path"], snapshot["run_id"], cleaning["run_id"],
+                     "SYN-A-001", _config(), allow_scenario=False)
+    invalid = _config()
+    invalid["growth_application"]["reason"] = ""
+    with pytest.raises(ValueError, match="непустые автор"):
+        run_forecast(dataset["database_path"], snapshot["run_id"], cleaning["run_id"],
+                     "SYN-A-001", invalid, allow_scenario=True)
+
+
+def test_cached_scenario_policy_still_requires_permission(forecast_dataset, monkeypatch):
+    dataset, snapshot, cleaning, _ = forecast_dataset
+    original_prepared_input = forecast_service.prepared_input
+
+    def confirmed_inputs(*args, **kwargs):
+        # Isolate the second gate: pretend the already tested input gate has
+        # returned confirmed data; the saved configuration is still a scenario.
+        result = original_prepared_input(*args, **{**kwargs, "allow_scenario": True})
+        return {**result, "status": "Достаточно данных"}
+
+    monkeypatch.setattr(forecast_service, "prepared_input", confirmed_inputs)
+    with pytest.raises(ValueError, match="Сценарный прогноз требует"):
+        run_forecast(dataset["database_path"], snapshot["run_id"], cleaning["run_id"],
+                     "SYN-A-001", _config(), allow_scenario=False)
+
+
+def test_forecast_config_change_refits_and_creates_new_version(forecast_dataset, monkeypatch):
+    dataset, snapshot, cleaning, runs = forecast_dataset
+    original_model = forecast_service.forecast_monthly
+    calls = []
+
+    def refit(*args, **kwargs):
+        calls.append(True)
+        return original_model(*args, **kwargs)
+
+    monkeypatch.setattr(forecast_service, "forecast_monthly", refit)
+    changed = _config()
+    changed["horizon_months"] = 6
+    result = run_forecast(dataset["database_path"], snapshot["run_id"], cleaning["run_id"],
+                         "SYN-A-001", changed, allow_scenario=True)
+    assert result["run_id"] != runs["SYN-A-001"]
+    assert calls == [True]
+    assert len(result["summary"]["forecasts"]) == 6
 
 
 def test_lost_demand_version_feeds_forecast_without_becoming_backlog(forecast_dataset):

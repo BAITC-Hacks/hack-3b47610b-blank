@@ -14,6 +14,7 @@ from hackalem.__main__ import main
 from hackalem.services.cleaning import run_cleaning
 from hackalem.services.forecasting import run_forecast
 from hackalem.services.imports import list_snapshots
+from hackalem.services import orders as orders_service
 from hackalem.services.orders import (
     approve_order, build_order_export, create_order_project, export_order_file,
     list_order_versions, order_report, submit_order_for_review, update_order_item,
@@ -249,3 +250,70 @@ def test_export_keeps_codes_and_formula_like_text_safe(order_source, tmp_path):
     book = load_workbook(io.BytesIO(xlsx_export["content"]), data_only=False)
     assert book["Заказ"]["D2"].value == "00123" and book["Заказ"]["D2"].data_type == "s"
     assert book["Заказ"]["E2"].value.startswith("=") and book["Заказ"]["E2"].data_type == "s"
+
+
+def test_xlsx_metadata_preserves_full_snapshot_as_text(order_source, tmp_path):
+    database, _, replenishment = _copy_database(order_source, tmp_path)
+    # A longer source trace is valid audit data and must survive the spreadsheet.
+    with sqlite3.connect(database) as connection:
+        stored = json.loads(connection.execute(
+            "SELECT payload_json FROM replenishment_items WHERE run_id=?",
+            (replenishment["run_id"],),
+        ).fetchone()[0])
+        stored["explanation"]["assumptions"].append("Подробное происхождение; " * 2000)
+        connection.execute(
+            "UPDATE replenishment_items SET payload_json=? WHERE run_id=?",
+            (json.dumps(stored, ensure_ascii=False), replenishment["run_id"]),
+        )
+    draft = create_order_project(database, replenishment["run_id"], "pytest")
+    review = submit_order_for_review(database, draft["version_id"], "pytest", "Проверено")
+    approved = approve_order(database, review["version_id"], "=1+1", "=2+2")
+    exported = build_order_export(database, approved["version_id"], "xlsx")
+    book = load_workbook(io.BytesIO(exported["content"]), data_only=False)
+    assert all(cell.data_type != "f" for sheet in book for row in sheet for cell in row)
+    # Large nested calculation records exceed Excel's per-cell text limit.
+    restored = {}
+    for row in book["Метаданные"].iter_rows(min_row=2, values_only=True):
+        key, value = row[:2]
+        restored[key] = restored.get(key, "") + (str(value) if value is not None else "")
+    assert json.loads(restored["source_replenishment"]) == approved["approval_snapshot"]["source_replenishment"]
+    assert json.loads(restored["items"]) == approved["approval_snapshot"]["items"]
+    assert len(restored["source_replenishment"]) > 32767
+    assert len(restored["items"]) > 32767
+    assert restored["responsible"] == "=1+1"
+    assert restored["approval_note"] == "=2+2"
+
+
+def test_approval_rejects_concurrent_review_change(order_source, tmp_path, monkeypatch):
+    database, _, replenishment = _copy_database(order_source, tmp_path)
+    draft = create_order_project(database, replenishment["run_id"], "pytest")
+    review = submit_order_for_review(database, draft["version_id"], "pytest", "Проверено")
+    original_report = orders_service.replenishment_report
+
+    def changed_during_approval(path, run_id):
+        source = original_report(path, run_id)
+        update_order_item(path, review["version_id"], review["items"][0]["sku"],
+                          review["items"][0]["selected_quantity"] + 12,
+                          "Другой менеджер", "Дополнительная потребность")
+        submit_order_for_review(path, review["version_id"], "Другой менеджер", "Перепроверено")
+        return source
+
+    monkeypatch.setattr(orders_service, "replenishment_report", changed_during_approval)
+    with pytest.raises(ValueError, match="изменена"):
+        approve_order(database, review["version_id"], "Ответственный", "Утверждаю")
+    current = order_report(database, review["version_id"])
+    assert current["status"] == "review"
+    assert current["approval_snapshot"] is None
+    assert current["items"][0]["selected_quantity"] == review["items"][0]["selected_quantity"] + 12
+
+
+@pytest.mark.parametrize("name", ["\t=1+1", "\r=1+1", "\n=1+1", "  @SUM(1;1)"])
+def test_csv_escapes_formula_like_text_after_whitespace(order_source, tmp_path, name):
+    database, _, replenishment = _copy_database(order_source, tmp_path)
+    draft = create_order_project(database, replenishment["run_id"], "pytest")
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE order_items SET name=? WHERE version_id=?",
+                           (name, draft["version_id"]))
+    exported = build_order_export(database, draft["version_id"], "csv")
+    row = list(csv.DictReader(io.StringIO(exported["content"].decode("utf-8-sig")), delimiter=";"))[0]
+    assert row["Наименование"] == "'" + name

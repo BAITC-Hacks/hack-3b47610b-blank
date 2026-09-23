@@ -38,6 +38,13 @@ def _parser() -> argparse.ArgumentParser:
         description="Импорт и проверка данных Systeme Electric и IEK.",
     )
     commands = parser.add_subparsers(dest="command", required=True)
+    demo = commands.add_parser("demo", help="Подготовить отдельную синтетическую демонстрацию")
+    demo.add_argument("--output-root", type=Path)
+    demo.add_argument("--seed", type=int, default=20260923)
+    backup = commands.add_parser("db-backup", help="Согласованная резервная копия SQLite в новый файл")
+    backup.add_argument("--output", type=Path, required=True)
+    restore = commands.add_parser("db-restore", help="Восстановить копию в пустой HACKALEM_DATA_DIR")
+    restore.add_argument("--input", type=Path, required=True)
     commands.add_parser("import-systeme", help="Импортировать отчёты в новый снимок")
     commands.add_parser("import-iek", help="Импортировать IEK и встроенный архивный прайс")
     commands.add_parser("list-snapshots", help="Показать сохранённые снимки")
@@ -147,6 +154,19 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(encoding="utf-8")
     args = _parser().parse_args(argv)
     try:
+        # These commands must not bootstrap/migrate the live database first.
+        if args.command == "demo":
+            from hackalem.services.demo import DEFAULT_DEMO_ROOT, prepare_demo
+            result = prepare_demo(args.output_root or DEFAULT_DEMO_ROOT, args.seed)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+        if args.command in ("db-backup", "db-restore"):
+            from hackalem.services.backup import copy_database
+            database = load_settings().database_path
+            result = (copy_database(database, args.output) if args.command == "db-backup"
+                      else copy_database(args.input, database))
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
         if args.command in ("synthetic-generate", "synthetic-report", "forecast-evaluate"):
             from hackalem.services.synthetic import (
                 DEFAULT_OUTPUT_ROOT, create_synthetic_dataset, evaluate_forecasts, synthetic_report,

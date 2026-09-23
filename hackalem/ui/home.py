@@ -198,7 +198,8 @@ def _reset_workspace_selection() -> None:
 def _reset_calculation_selection() -> None:
     for key in list(st.session_state):
         if ((key.startswith("procurement_") or key.startswith("card_") or
-             key.startswith("scenario_")) and key.endswith(("_run_id", "_base"))):
+             key.startswith("scenario_")) and key.endswith(("_run_id", "_base")) or
+                (key.startswith("order_") and key.endswith("_source_run"))):
             st.session_state.pop(key, None)
 
 
@@ -252,7 +253,6 @@ def render_home() -> None:
         st.stop()
     with st.sidebar:
         st.write("Локальное хранилище подключено")
-        st.caption("Реализованы этапы 1–11 из 12")
         with st.expander("Расположение файлов"):
             st.write("Исходные отчёты")
             st.code(str(state.settings.source_dir), language=None)
